@@ -3,8 +3,10 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
 import { isValidRecoveryQuestion } from '@/lib/games/rules';
+import { assertPuzzleImageStorageAvailable } from '@/lib/storage/puzzleImages';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 export async function GET() {
   try {
@@ -71,6 +73,13 @@ export async function GET() {
         options: question.options.map((option) => ({ optionText: option.option_text })),
       })
     );
+    let puzzleStorageReady = false;
+    try {
+      await assertPuzzleImageStorageAvailable();
+      puzzleStorageReady = true;
+    } catch {
+      puzzleStorageReady = false;
+    }
     const canStart =
       teams >= 1
       && enabledGames.length >= 6
@@ -78,7 +87,8 @@ export async function GET() {
       && gamesReady.filter((game) => game.ready).length === enabledGames.length
       && missingProjects.length === 0
       && missingHints.length === 0
-      && recoveryQuestionsReady;
+      && recoveryQuestionsReady
+      && puzzleStorageReady;
 
     return NextResponse.json({
       teamsCount: teams,
@@ -89,6 +99,10 @@ export async function GET() {
       missingProjects,
       missingHints,
       recoveryQuestionsReady,
+      puzzleStorageReady,
+      puzzleStorageMessage: puzzleStorageReady
+        ? null
+        : 'Private puzzle storage is not configured or its bucket is unavailable.',
     });
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { PuzzleImageStorageError, resolvePuzzleImageUrl } from '@/lib/storage/puzzleImages';
+
+export const runtime = 'nodejs';
 
 export async function GET(req: NextRequest) {
   try {
@@ -32,7 +35,7 @@ export async function GET(req: NextRequest) {
         id: puzzle.id,
         status: puzzle.status,
         questionText: puzzle.question.question_text,
-        imageUrl: puzzle.question.image_url,
+        imageUrl: await resolvePuzzleImageUrl(puzzle.question.image_url),
         options: puzzle.question.options.map((option) => ({
           id: option.id,
           text: option.option_text,
@@ -42,6 +45,9 @@ export async function GET(req: NextRequest) {
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+    if (error instanceof PuzzleImageStorageError) {
+      return NextResponse.json({ error: error.message }, { status: error.statusCode });
     }
     return NextResponse.json({ error: 'Failed to load recovery puzzle' }, { status: 500 });
   }

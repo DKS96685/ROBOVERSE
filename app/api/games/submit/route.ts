@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { GAME_RULES } from '@/lib/config/gameRules';
+import { PuzzleImageStorageError, resolvePuzzleImageUrl } from '@/lib/storage/puzzleImages';
 import {
   getFailedAttemptDisposition,
   getGameCompletionPoints,
   isValidRecoveryQuestion,
 } from '@/lib/games/rules';
+
+export const runtime = 'nodejs';
 
 async function remainingLifelines(tx: any, teamId: string) {
   const events = await tx.lifelineEvent.findMany({
@@ -366,6 +369,15 @@ export async function POST(req: NextRequest) {
         { status: outcome.status || 400 }
       );
     }
+    if (outcome.pendingRecoveryPuzzle && outcome.puzzle) {
+      return NextResponse.json({
+        ...outcome,
+        puzzle: {
+          ...outcome.puzzle,
+          imageUrl: await resolvePuzzleImageUrl(outcome.puzzle.imageUrl),
+        },
+      });
+    }
     return NextResponse.json(outcome);
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
@@ -373,6 +385,9 @@ export async function POST(req: NextRequest) {
     }
     if (error.code === 'P2034') {
       return NextResponse.json({ error: 'Game result conflicted. Please retry.' }, { status: 409 });
+    }
+    if (error instanceof PuzzleImageStorageError) {
+      return NextResponse.json({ error: error.message }, { status: error.statusCode });
     }
     console.error('Game submit error:', error);
     return NextResponse.json({ error: 'Failed to submit game result' }, { status: 500 });

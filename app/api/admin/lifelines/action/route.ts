@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { lockTeamLifelines } from '@/lib/lifelines';
 
 async function reverseActiveRetry(tx: any, event: any): Promise<boolean> {
   if (!event.team_game_id && !event.session_id) return false;
@@ -88,6 +89,7 @@ export async function POST(req: NextRequest) {
           include: { team: true, game: true },
         });
         if (!targetEvent) return { error: 'Lifeline event not found', status: 404 };
+        await lockTeamLifelines(tx, targetEvent.team_id);
         if (targetEvent.action !== 'used') {
           return { error: 'Only a lifeline usage can be reverted.', status: 409 };
         }
@@ -193,6 +195,7 @@ export async function POST(req: NextRequest) {
     // 2. Revert the most recent deduction for a team
     if (action === 'revert_last' && teamId) {
       const result = await prisma.$transaction(async (tx) => {
+        await lockTeamLifelines(tx, teamId);
         const lastUsedEvent = await tx.lifelineEvent.findFirst({
           where: { team_id: teamId, action: 'used' },
           orderBy: { created_at: 'desc' },
@@ -271,6 +274,7 @@ export async function POST(req: NextRequest) {
 
       const marker = `[lifeline-correction:deduct:${teamId}:${correctionKey}]`;
       const result = await prisma.$transaction(async (tx) => {
+        await lockTeamLifelines(tx, teamId);
         const existing = await tx.lifelineEvent.findFirst({
           where: { team_id: teamId, note: { contains: marker } },
         });
@@ -331,6 +335,7 @@ export async function POST(req: NextRequest) {
 
       const marker = `[lifeline-correction:grant:${teamId}:${correctionKey}]`;
       const result = await prisma.$transaction(async (tx) => {
+        await lockTeamLifelines(tx, teamId);
         const existing = await tx.lifelineEvent.findFirst({
           where: { team_id: teamId, note: { contains: marker } },
         });

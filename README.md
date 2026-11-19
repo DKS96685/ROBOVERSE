@@ -26,11 +26,13 @@ The following features are present in the repository:
 - An admin-protected leaderboard route.
 - Application code for randomized persistent game allocation, lifeline retries, recovery puzzles, project-specific game clues, and server-side scoring.
 - Server-owned progress simulation for Snake and Pong, server-owned card/deck state for Memory, and validated server state/actions for the other included games.
-- Component image uploads with content-signature and size checks. Images currently use deployment-local storage and are not persistent on serverless hosts.
+- Component image uploads validated by MIME signature and a 2 MB limit, stored in a private Neon Object Storage bucket with server-generated signed preview URLs.
 
 The randomized allocation, lifeline, recovery puzzle, clue, and scoring flows depend on Prisma schema additions that are not represented in the checked-in migration history. A consolidated database migration has not been applied, so these flows are not ready to use against the current database.
 
 The game progress API simulates Snake movement and collisions, Pong ball/paddle outcomes, and Memory card matching on the server. Client-side scores are not authoritative. These application paths still require database migration and end-to-end testing against the event database before they can be used in production.
+
+The private image bucket is declared in `neon.ts` but has not been provisioned. After confirming the linked Neon production branch, an administrator must run `neon deploy` and configure the injected `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, and `AWS_REGION` values in the app host's server environment. Do not expose these values to client-side code or commit them. Neon Object Storage is not a separate paid provider, but usage is subject to Neon plan limits and billing. Existing `/uploads/...` image references must be re-uploaded through the admin puzzle editor before serverless deployment; their old local files are not durable.
 
 Do not treat the listed features or competition rules as proof that the platform is production-ready. Before the event, reconcile and review the database migration, configure persistent puzzle-image storage, apply the database migration only with explicit approval, and complete end-to-end testing of assignments, retries, recovery puzzles, clue access, scoring, and pause/resume behavior.
 

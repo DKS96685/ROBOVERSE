@@ -21,6 +21,7 @@ import {
   isValidRecoveryQuestion,
   selectGamesForTeam,
 } from '../lib/games/rules.ts';
+import { getPuzzleImageExtension } from '../lib/storage/imageValidation.ts';
 
 test('supported game catalog has six distinct playable entries', () => {
   const keys = GAME_CATALOG.map((game) => game.gameKey);
@@ -175,4 +176,11 @@ test('competition helpers cover points, puzzle validation, duplicate actions, an
   }
   assert.equal(Array.from(counts.values()).reduce((sum, count) => sum + count, 0), 18);
   assert.ok(Math.max(...counts.values()) - Math.min(...counts.values()) <= 1);
+});
+
+test('puzzle image upload accepts supported signatures and rejects mismatches or oversized files', () => {
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.equal(getPuzzleImageExtension(pngSignature, 'image/png'), 'png');
+  assert.equal(getPuzzleImageExtension(pngSignature, 'image/jpeg'), null);
+  assert.equal(getPuzzleImageExtension(Buffer.alloc(2 * 1024 * 1024 + 1), 'image/png'), null);
 });

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { GAME_RULES } from './config/gameRules';
 
@@ -8,6 +9,13 @@ export interface TeamLifelineSummary {
   netUsed: number;
   remaining: number;
   isEliminated: boolean;
+}
+
+export async function lockTeamLifelines(
+  tx: Prisma.TransactionClient,
+  teamId: string
+): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "Team" WHERE "id" = ${teamId} FOR UPDATE`;
 }
 
 export async function getTeamLifelines(teamId: string): Promise<TeamLifelineSummary> {
@@ -51,6 +59,7 @@ export async function deductLifeline(params: {
   byAdmin?: boolean;
 }) {
   return await prisma.$transaction(async (tx) => {
+    await lockTeamLifelines(tx, params.teamId);
     if (params.gameId) {
       const existingDeduction = await tx.lifelineEvent.findFirst({
         where: {

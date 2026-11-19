@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db';
 import { GAME_RULES } from '@/lib/config/gameRules';
 import { getGameProgressTarget } from '@/lib/config/gameCatalog';
 import { createInitialGameState, getPublicGameState } from '@/lib/games/state';
+import { lockTeamLifelines } from '@/lib/lifelines';
 
 export async function POST(req: NextRequest) {
   try {
@@ -17,6 +18,7 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockTeamLifelines(tx, session.teamId!);
       const team = await tx.team.findUnique({
         where: { id: session.teamId! },
         select: { active: true },

@@ -3,8 +3,10 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { getEventState } from '@/lib/event';
 import { getTeamLifelines } from '@/lib/lifelines';
+import { PuzzleImageStorageError, resolvePuzzleImageUrl } from '@/lib/storage/puzzleImages';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 export async function GET() {
   try {
@@ -85,20 +87,19 @@ export async function GET() {
           },
         })
       : [];
-    const puzzleByTeamGameId = new Map(
-      pendingPuzzles.map((puzzle) => [
+    const puzzleEntries = await Promise.all(pendingPuzzles.map(async (puzzle) => [
         puzzle.team_game_id,
         {
           id: puzzle.id,
           questionText: puzzle.question.question_text,
-          imageUrl: puzzle.question.image_url,
+          imageUrl: await resolvePuzzleImageUrl(puzzle.question.image_url),
           options: puzzle.question.options.map((option) => ({
             id: option.id,
             text: option.option_text,
           })),
         },
-      ])
-    );
+      ] as const));
+    const puzzleByTeamGameId = new Map(puzzleEntries);
 
     const gamesData = teamGames.map((teamGame) => ({
       id: teamGame.game.id,
@@ -143,6 +144,9 @@ export async function GET() {
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+    if (error instanceof PuzzleImageStorageError) {
+      return NextResponse.json({ error: error.message }, { status: error.statusCode });
     }
     console.error('Team dashboard error:', error);
     return NextResponse.json(

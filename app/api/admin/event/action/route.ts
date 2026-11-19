@@ -5,6 +5,9 @@ import { logAuditEvent } from '@/lib/audit';
 import crypto from 'crypto';
 import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
 import { isValidRecoveryQuestion, selectGamesForTeam } from '@/lib/games/rules';
+import { assertPuzzleImageStorageAvailable } from '@/lib/storage/puzzleImages';
+
+export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,6 +24,14 @@ export async function POST(req: NextRequest) {
     if (action === 'start') {
       if (event?.status === 'running' || event?.status === 'paused') {
         return NextResponse.json({ error: 'Event is already running or paused.' }, { status: 409 });
+      }
+      try {
+        await assertPuzzleImageStorageAvailable();
+      } catch {
+        return NextResponse.json(
+          { error: 'Private puzzle storage is not configured or its bucket is unavailable.' },
+          { status: 503 }
+        );
       }
 
       const updated = await prisma.$transaction(async (tx) => {

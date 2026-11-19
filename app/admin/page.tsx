@@ -73,6 +73,7 @@ export default function AdminDashboard() {
   const [puzzleForm, setPuzzleForm] = useState({
     questionText: '',
     imageUrl: '',
+    imagePreviewUrl: '',
     options: ['', '', '', ''],
     correctAnswer: '',
     enabled: true,
@@ -224,7 +225,11 @@ export default function AdminDashboard() {
       body: JSON.stringify({
         action: selectedPuzzle ? 'update' : 'create',
         questionId: selectedPuzzle?.id,
-        ...puzzleForm,
+        questionText: puzzleForm.questionText,
+        imageUrl: puzzleForm.imageUrl,
+        options: puzzleForm.options,
+        correctAnswer: puzzleForm.correctAnswer,
+        enabled: puzzleForm.enabled,
       }),
     });
     const json = await res.json();
@@ -234,7 +239,7 @@ export default function AdminDashboard() {
     }
     setPuzzleEditorOpen(false);
     setSelectedPuzzle(null);
-    setPuzzleForm({ questionText: '', imageUrl: '', options: ['', '', '', ''], correctAnswer: '', enabled: true });
+    setPuzzleForm({ questionText: '', imageUrl: '', imagePreviewUrl: '', options: ['', '', '', ''], correctAnswer: '', enabled: true });
     fetchPuzzles();
   };
 
@@ -576,6 +581,9 @@ export default function AdminDashboard() {
             <span>{preflight?.teamsCount ?? '—'} active teams</span>
             <span>{preflight?.enabledGamesCount ?? '—'} / 6–10 enabled games</span>
             <span>{preflight?.recoveryQuestionsReady ? 'Recovery question ready' : 'Valid recovery question missing'}</span>
+            <span className={preflight?.puzzleStorageReady ? 'text-retro-green' : 'text-retro-red'}>
+              {preflight?.puzzleStorageReady ? 'Persistent puzzle storage ready' : 'Private puzzle storage unavailable'}
+            </span>
             {(preflight?.missingProjects?.length > 0) && (
               <span className="text-retro-red">{preflight.missingProjects.length} teams need projects</span>
             )}
@@ -583,7 +591,7 @@ export default function AdminDashboard() {
               <span className="text-retro-red">{preflight.missingHints.length} teams need game clues</span>
             )}
             {preflight && !preflight.canStart && preflight.missingProjects?.length === 0 && preflight.missingHints?.length === 0 && (
-              <span className="text-retro-red">Check game count and supported games.</span>
+              <span className="text-retro-red">Resolve the remaining pre-flight requirements above.</span>
             )}
           </div>
         </section>
@@ -968,7 +976,7 @@ export default function AdminDashboard() {
                 type="button"
                 onClick={() => {
                   setSelectedPuzzle(null);
-                  setPuzzleForm({ questionText: '', imageUrl: '', options: ['', '', '', ''], correctAnswer: '', enabled: true });
+                  setPuzzleForm({ questionText: '', imageUrl: '', imagePreviewUrl: '', options: ['', '', '', ''], correctAnswer: '', enabled: true });
                   setPuzzleEditorOpen(true);
                 }}
                 className="px-4 py-2 bg-retro-magenta text-white font-pixel text-[10px] rounded"
@@ -982,7 +990,7 @@ export default function AdminDashboard() {
                 <article key={question.id} className="bg-retro-card border border-retro-border rounded-lg p-4">
                   <div className="flex gap-3">
                     <img
-                      src={question.image_url}
+                      src={question.image_preview_url || question.image_url}
                       alt="Component recovery question"
                       className="w-28 h-20 object-contain border border-retro-border rounded bg-retro-bg"
                     />
@@ -1023,6 +1031,7 @@ export default function AdminDashboard() {
                         setPuzzleForm({
                           questionText: question.question_text,
                           imageUrl: question.image_url,
+                          imagePreviewUrl: question.image_preview_url || question.image_url,
                           options: question.options.map((option: any) => option.option_text),
                           correctAnswer: question.correct_answer,
                           enabled: question.enabled,
@@ -1312,7 +1321,11 @@ export default function AdminDashboard() {
                 <input
                   required
                   value={puzzleForm.imageUrl}
-                  onChange={(event) => setPuzzleForm({ ...puzzleForm, imageUrl: event.target.value })}
+                  onChange={(event) => setPuzzleForm({
+                    ...puzzleForm,
+                    imageUrl: event.target.value,
+                    imagePreviewUrl: event.target.value,
+                  })}
                   className="mt-1 w-full bg-retro-bg border border-retro-border rounded px-3 py-2 text-white"
                 />
               </label>
@@ -1332,7 +1345,11 @@ export default function AdminDashboard() {
                       alert(json.error || 'Failed to upload image.');
                       return;
                     }
-                    setPuzzleForm((current) => ({ ...current, imageUrl: json.imageUrl }));
+                    setPuzzleForm((current) => ({
+                      ...current,
+                      imageUrl: json.imageUrl,
+                      imagePreviewUrl: json.previewUrl,
+                    }));
                   }}
                   className="mt-1 w-full text-xs text-white"
                 />

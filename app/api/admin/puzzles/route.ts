@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import {
+  isPuzzleImageReference,
+  PuzzleImageStorageError,
+  resolvePuzzleImageUrl,
+} from '@/lib/storage/puzzleImages';
+
+export const runtime = 'nodejs';
 
 export async function GET() {
   try {
@@ -19,10 +26,17 @@ export async function GET() {
       },
       orderBy: { created_at: 'desc' },
     });
-    return NextResponse.json({ questions });
+    const questionsWithPreview = await Promise.all(questions.map(async (question) => ({
+      ...question,
+      image_preview_url: await resolvePuzzleImageUrl(question.image_url),
+    })));
+    return NextResponse.json({ questions: questionsWithPreview });
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+    if (error instanceof PuzzleImageStorageError) {
+      return NextResponse.json({ error: error.message }, { status: error.statusCode });
     }
     return NextResponse.json({ error: 'Failed to load recovery puzzles' }, { status: 500 });
   }
@@ -56,6 +70,20 @@ export async function POST(req: NextRequest) {
 
       if (!questionText || !imageUrl || !correctAnswer) {
         return NextResponse.json({ error: 'Question text, image, and correct answer are required.' }, { status: 400 });
+      }
+      let isAllowedImageUrl = imageUrl.startsWith('/uploads/');
+      if (!isAllowedImageUrl && !isPuzzleImageReference(imageUrl)) {
+        try {
+          const parsedUrl = new URL(imageUrl);
+          isAllowedImageUrl = parsedUrl.protocol === 'https:' || parsedUrl.protocol === 'http:';
+        } catch {
+          isAllowedImageUrl = false;
+        }
+      } else if (isPuzzleImageReference(imageUrl)) {
+        isAllowedImageUrl = true;
+      }
+      if (!isAllowedImageUrl) {
+        return NextResponse.json({ error: 'Provide a valid uploaded image or HTTP(S) image URL.' }, { status: 400 });
       }
       if (options.length < 2 || options.length > 6) {
         return NextResponse.json({ error: 'Provide between 2 and 6 answer choices.' }, { status: 400 });
@@ -132,6 +160,9 @@ export async function POST(req: NextRequest) {
     }
     if (error.code === 'P2025') {
       return NextResponse.json({ error: 'Component question not found.' }, { status: 404 });
+    }
+    if (error instanceof PuzzleImageStorageError) {
+      return NextResponse.json({ error: error.message }, { status: error.statusCode });
     }
     console.error('Admin puzzle action error:', error);
     return NextResponse.json({ error: 'Failed to update recovery puzzles' }, { status: 500 });
