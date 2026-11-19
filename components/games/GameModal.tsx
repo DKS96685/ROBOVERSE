@@ -62,6 +62,7 @@ export default function GameModal({
   const eventPausedRef = useRef(eventPaused);
   const countdownRef = useRef<number | null>(null);
   const resultSubmittedRef = useRef(false);
+  const actionSequenceRef = useRef(0);
 
   // Result state
   const [resultState, setResultState] = useState<'idle' | 'won' | 'recovered'>('idle');
@@ -77,9 +78,12 @@ export default function GameModal({
     action: ServerGameAction
   ): Promise<GameProgressResponse | null> => {
     if (!sessionId) return null;
+    const orderedGame = ['snake', 'pong', 'memory'].includes(game.gameKey);
+    const actionSequence = orderedGame ? actionSequenceRef.current + 1 : undefined;
     const body = JSON.stringify({
       sessionId,
       requestId: window.crypto.randomUUID(),
+      ...(actionSequence === undefined ? {} : { actionSequence }),
       action,
     });
 
@@ -97,8 +101,14 @@ export default function GameModal({
           && data.error === 'Progress update conflicted. Retry.'
         ) continue;
         if (!res.ok) {
+          if (Number.isSafeInteger(data.expectedActionSequence)) {
+            actionSequenceRef.current = Math.max(0, data.expectedActionSequence - 1);
+          }
           setErrorMsg(data.error || 'Failed to verify game progress.');
           return null;
+        }
+        if (Number.isSafeInteger(data.nextActionSequence)) {
+          actionSequenceRef.current = data.nextActionSequence;
         }
         return data as GameProgressResponse;
       } catch (error) {
@@ -109,7 +119,7 @@ export default function GameModal({
       }
     }
     return null;
-  }, [sessionId]);
+  }, [game.gameKey, sessionId]);
 
   useEffect(() => () => {
     if (countdownRef.current !== null) window.clearInterval(countdownRef.current);
@@ -134,6 +144,7 @@ export default function GameModal({
         throw new Error('The server did not return a valid game state. Please contact an administrator.');
       }
       setSessionId(data.sessionId);
+      actionSequenceRef.current = Number.isSafeInteger(data.actionSequence) ? data.actionSequence : 0;
       setServerGameState(parsedState);
       resultSubmittedRef.current = false;
       setCountdownValue(null);
@@ -315,6 +326,7 @@ export default function GameModal({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to start lifeline retry');
       setSessionId(data.sessionId);
+      actionSequenceRef.current = Number.isSafeInteger(data.actionSequence) ? data.actionSequence : 0;
       const parsedState = parseServerGameState(data.gameConfig);
       if (!parsedState || parsedState.gameKey !== game.gameKey) {
         throw new Error('The server did not return a valid retry state. Please contact an administrator.');

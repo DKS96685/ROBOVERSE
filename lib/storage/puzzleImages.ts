@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { getPuzzleImageExtension } from './imageValidation';
+import { getValidatedPuzzleImageExtension } from './imageValidation';
 
 const BUCKET = 'roboverse-puzzle-images';
 const IMAGE_PREFIX = `neon-s3://${BUCKET}/`;
@@ -70,9 +70,9 @@ export async function uploadPuzzleImage(
   if (bytes.length > MAX_IMAGE_BYTES) {
     throw new PuzzleImageStorageError('Image must be no larger than 2 MB.', 413);
   }
-  const extension = getPuzzleImageExtension(bytes, mimeType);
+  const extension = await getValidatedPuzzleImageExtension(bytes, mimeType);
   if (!extension) {
-    throw new PuzzleImageStorageError('The file contents do not match a supported image type.', 400);
+    throw new PuzzleImageStorageError('The upload is not a valid, decodable JPG, PNG, or WebP image.', 400);
   }
 
   const key = `component-questions/${crypto.randomUUID()}.${extension}`;

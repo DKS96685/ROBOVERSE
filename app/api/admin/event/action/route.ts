@@ -35,17 +35,29 @@ export async function POST(req: NextRequest) {
       }
 
       const updated = await prisma.$transaction(async (tx) => {
-        const existingAssignment = await tx.teamGame.findFirst({
-          where: {
-            OR: [
-              { required: true },
-              { assignment_run_id: { not: null } },
-            ],
-          },
-          select: { id: true },
-        });
-        const existingSession = await tx.gameSession.findFirst({ select: { id: true } });
-        if (existingAssignment || existingSession) throw new Error('EVENT_DATA_EXISTS');
+        const [
+          existingAssignment,
+          existingSession,
+          existingLifelineEvent,
+          existingScore,
+          existingRecoveryPuzzle,
+          existingClueUnlock,
+        ] = await Promise.all([
+          tx.teamGame.findFirst({ select: { id: true } }),
+          tx.gameSession.findFirst({ select: { id: true } }),
+          tx.lifelineEvent.findFirst({ select: { id: true } }),
+          tx.teamScore.findFirst({ select: { id: true } }),
+          tx.recoveryPuzzle.findFirst({ select: { id: true } }),
+          tx.projectClueUnlock.findFirst({ select: { id: true } }),
+        ]);
+        if (
+          existingAssignment
+          || existingSession
+          || existingLifelineEvent
+          || existingScore
+          || existingRecoveryPuzzle
+          || existingClueUnlock
+        ) throw new Error('EVENT_DATA_EXISTS');
 
         const activeTeams = await tx.team.findMany({
           where: { active: true },
@@ -103,14 +115,6 @@ export async function POST(req: NextRequest) {
         const seenCombinations = new Set<string>();
 
         for (const team of activeTeams) {
-          await tx.teamGame.deleteMany({
-            where: {
-              team_id: team.id,
-              required: false,
-              assignment_run_id: null,
-            },
-          });
-
           const selected = selectGamesForTeam(
             enabledGames,
             assignmentCounts,
@@ -285,41 +289,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, eventState: updated });
     }
 
-    // Full event data reset — keeps teams and games
     if (action === 'reset_data') {
-      if (event?.status === 'running' || event?.status === 'paused') {
-        return NextResponse.json({ error: 'Pause or end the event before resetting competition data.' }, { status: 409 });
-      }
-
-      const resetEvent = await prisma.$transaction(async (tx) => {
-        await tx.recoveryPuzzleAttempt.deleteMany();
-        await tx.projectClueUnlock.deleteMany();
-        await tx.recoveryPuzzle.deleteMany();
-        await tx.gameSession.deleteMany();
-        await tx.lifelineEvent.deleteMany();
-        await tx.teamScore.deleteMany();
-        await tx.teamGame.deleteMany();
-
-        const updatedEvent = await tx.eventState.upsert({
-          where: { id: 'global' },
-          update: { status: 'ready', started_at: null, paused_at: null, total_paused_seconds: 0 },
-          create: { id: 'global', status: 'ready', started_at: null, paused_at: null, total_paused_seconds: 0 },
-        });
-        await tx.auditLog.create({
-          data: {
-            actor: session.email || 'admin',
-            action: 'event_data_reset',
-            before: JSON.stringify(beforeState),
-            after: JSON.stringify({
-              status: 'ready',
-              preserved: ['teams', 'projects', 'games', 'project hints', 'component questions', 'audit history'],
-              cleared: ['assignments', 'game sessions', 'lifeline events', 'scores', 'recovery puzzles', 'clue unlocks'],
-            }),
-          },
-        });
-        return updatedEvent;
-      });
-      return NextResponse.json({ success: true, eventState: resetEvent });
+      return NextResponse.json({
+        error: 'Competition history cannot be cleared from the event controls. Existing assignments and clue history are preserved.',
+      }, { status: 409 });
     }
 
     return NextResponse.json({ error: 'Invalid event action' }, { status: 400 });
@@ -344,7 +317,7 @@ export async function POST(req: NextRequest) {
     }
     if (error.message === 'EVENT_DATA_EXISTS') {
       return NextResponse.json(
-        { error: 'Existing assignments or game sessions were preserved. Use RESET EVENT DATA before starting a new competition run.' },
+        { error: 'Existing competition history was preserved. Starting a new run is blocked to protect assignments, scores, lifelines, puzzles, and clue unlocks.' },
         { status: 409 }
       );
     }

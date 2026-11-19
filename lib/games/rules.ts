@@ -35,6 +35,23 @@ export function isDuplicateProgressRequest(processedRequestIds: string[], reques
   return processedRequestIds.includes(requestId);
 }
 
+export function getProgressRequestDisposition(
+  processedRequestIds: string[],
+  fingerprints: Record<string, unknown>,
+  requestId: string,
+  fingerprint: string
+): 'NEW' | 'DUPLICATE' | 'REQUEST_ID_REUSED' {
+  if (!isDuplicateProgressRequest(processedRequestIds, requestId)) return 'NEW';
+  const previousFingerprint = fingerprints[requestId];
+  return typeof previousFingerprint === 'string' && previousFingerprint !== fingerprint
+    ? 'REQUEST_ID_REUSED'
+    : 'DUPLICATE';
+}
+
+export function isNextProgressActionSequence(currentSequence: number, receivedSequence: number): boolean {
+  return Number.isSafeInteger(receivedSequence) && receivedSequence === currentSequence + 1;
+}
+
 export function selectGamesForTeam<T extends { id: string }>(
   games: T[],
   assignmentCounts: Map<string, number>,

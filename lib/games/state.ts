@@ -113,6 +113,7 @@ export interface GameProgressResponse {
   progress: number;
   target: number;
   winningReady: boolean;
+  nextActionSequence?: number;
   duplicate?: boolean;
   gameState?: ServerGameState;
   correct?: boolean;

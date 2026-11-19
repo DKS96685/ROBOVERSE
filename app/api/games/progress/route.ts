@@ -3,7 +3,10 @@ import { Prisma } from '@prisma/client';
 import crypto from 'crypto';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
-import { isDuplicateProgressRequest } from '@/lib/games/rules';
+import {
+  getProgressRequestDisposition,
+  isNextProgressActionSequence,
+} from '@/lib/games/rules';
 
 import {
   GameProgressResponse,
@@ -82,6 +85,9 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const sessionId = typeof body.sessionId === 'string' ? body.sessionId : null;
     const action = parseAction(body.action);
+    const actionSequence = Number.isSafeInteger(body.actionSequence) && body.actionSequence > 0
+      ? body.actionSequence as number
+      : null;
     const requestId = typeof body.requestId === 'string'
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)
       ? body.requestId
@@ -112,6 +118,10 @@ export async function POST(req: NextRequest) {
       }
       if (gameSession.result !== 'in_progress') {
         return { error: 'This game session has already been concluded.', status: 409 };
+      }
+      const requiresActionSequence = ['snake', 'pong', 'memory'].includes(gameSession.game.game_key);
+      if (requiresActionSequence && actionSequence === null) {
+        return { error: 'A valid action sequence is required for this game.', status: 400 };
       }
 
       const assigned = await tx.teamGame.findUnique({
@@ -149,17 +159,39 @@ export async function POST(req: NextRequest) {
       const processedRequestIds = Array.isArray(state.processedProgressRequestIds)
         ? state.processedProgressRequestIds.filter((value): value is string => typeof value === 'string')
         : [];
+      const actionFingerprints =
+        state.processedProgressActionFingerprints
+        && typeof state.processedProgressActionFingerprints === 'object'
+          ? state.processedProgressActionFingerprints as Record<string, unknown>
+          : {};
+      const requestFingerprint = `${actionSequence ?? ''}:${JSON.stringify(action)}`;
       const recordedProgress =
         typeof state.serverProgress === 'number'
           ? Math.max(0, Math.floor(state.serverProgress))
           : gameSession.progress;
-      if (isDuplicateProgressRequest(processedRequestIds, requestId)) {
+      const requestDisposition = getProgressRequestDisposition(
+        processedRequestIds,
+        actionFingerprints,
+        requestId,
+        requestFingerprint
+      );
+      if (requestDisposition === 'REQUEST_ID_REUSED') {
+        return { error: 'A progress request ID cannot be reused for a different action.', status: 409 };
+      }
+      if (requestDisposition === 'DUPLICATE') {
         const duplicate: GameProgressResponse = {
           success: true,
           accepted: true,
           progress: gameSession.progress,
           target: gameSession.validated_target,
           winningReady: gameSession.progress >= gameSession.validated_target,
+          ...(requiresActionSequence
+            ? {
+                nextActionSequence: Number.isSafeInteger(state.progressActionSequence)
+                  ? Number(state.progressActionSequence)
+                  : 0,
+              }
+            : {}),
           duplicate: true,
         };
         const gameState = getPublicGameState(state);
@@ -176,6 +208,20 @@ export async function POST(req: NextRequest) {
             || (gameSession.game.game_key === 'target-sequence' && Number(state.failures || 0) >= 3);
         }
         return duplicate;
+      }
+      const currentActionSequence = Number.isSafeInteger(state.progressActionSequence)
+        ? Number(state.progressActionSequence)
+        : 0;
+      if (
+        requiresActionSequence
+        && actionSequence !== null
+        && !isNextProgressActionSequence(currentActionSequence, actionSequence)
+      ) {
+        return {
+          error: 'Game action is repeated or out of order. Synchronize and try again.',
+          status: 409,
+          expectedActionSequence: currentActionSequence + 1,
+        };
       }
       if (gameSession.progress >= gameSession.validated_target) {
         return { error: 'The game is already server-verified as won.', status: 409 };
@@ -202,6 +248,15 @@ export async function POST(req: NextRequest) {
         gameKey: gameSession.game.game_key,
         lastActionAt: new Date(now).toISOString(),
         processedProgressRequestIds: [...processedRequestIds, requestId],
+        ...(requiresActionSequence && actionSequence !== null
+          ? {
+              progressActionSequence: actionSequence,
+              processedProgressActionFingerprints: {
+                ...actionFingerprints,
+                [requestId]: requestFingerprint,
+              },
+            }
+          : {}),
       };
       let correct: boolean | undefined;
       let failed: boolean | undefined;
@@ -342,6 +397,9 @@ export async function POST(req: NextRequest) {
         progress: nextProgress,
         target: gameSession.validated_target,
         winningReady: nextProgress >= gameSession.validated_target,
+        ...(requiresActionSequence && actionSequence !== null
+          ? { nextActionSequence: actionSequence }
+          : {}),
         duplicate: false,
       };
       const gameState = getPublicGameState(nextState);
@@ -353,7 +411,12 @@ export async function POST(req: NextRequest) {
     }, { isolationLevel: 'Serializable' });
 
     if ('error' in result) {
-      return NextResponse.json({ error: result.error }, { status: result.status });
+      return NextResponse.json({
+        error: result.error,
+        ...('expectedActionSequence' in result
+          ? { expectedActionSequence: result.expectedActionSequence }
+          : {}),
+      }, { status: result.status });
     }
     return NextResponse.json(result);
   } catch (error: any) {

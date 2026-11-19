@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { GameProgressResponse, MemoryGameState, ServerGameAction } from '@/lib/games/state';
+import { runOnce } from '@/lib/games/callbacks';
 import { soundManager } from '@/lib/sound';
 import { usePausedGameClock } from './usePausedGameClock';
 
@@ -51,16 +52,14 @@ export default function MemoryMatchGame({
   propsRef.current = { onAction, onWin, onLose, minSeconds, secondsElapsed };
 
   const notifyWin = useCallback(() => {
-    if (winNotifiedRef.current) return;
-    winNotifiedRef.current = true;
-    soundManager.playLevelClear();
-    propsRef.current.onWin();
+    runOnce(winNotifiedRef, () => {
+      soundManager.playLevelClear();
+      propsRef.current.onWin();
+    });
   }, []);
 
   const notifyLose = useCallback(() => {
-    if (loseNotifiedRef.current) return;
-    loseNotifiedRef.current = true;
-    propsRef.current.onLose();
+    runOnce(loseNotifiedRef, () => propsRef.current.onLose());
   }, []);
 
   const updateFromResponse = useCallback((response: GameProgressResponse) => {

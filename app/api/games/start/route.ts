@@ -69,6 +69,12 @@ export async function POST(req: NextRequest) {
           minSeconds: teamGame.game.min_seconds,
           resumed: true,
           gameConfig: activeSession.game_state,
+          actionSequence:
+            activeSession.game_state
+            && typeof activeSession.game_state === 'object'
+            && Number.isSafeInteger((activeSession.game_state as Record<string, unknown>).progressActionSequence)
+              ? Number((activeSession.game_state as Record<string, unknown>).progressActionSequence)
+              : 0,
         };
       }
 
@@ -109,6 +115,7 @@ export async function POST(req: NextRequest) {
         minSeconds: teamGame.game.min_seconds,
         resumed: false,
         gameConfig,
+        actionSequence: 0,
       };
     }, { isolationLevel: 'Serializable' });
 
@@ -129,6 +136,7 @@ export async function POST(req: NextRequest) {
       minSeconds: result.minSeconds,
       progress: result.session.progress,
       resumed: result.resumed,
+      actionSequence: result.actionSequence,
       gameConfig: publicGameConfig,
     });
   } catch (error: any) {

@@ -143,7 +143,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({ ...result, gameConfig: publicGameConfig });
+    return NextResponse.json({ ...result, actionSequence: 0, gameConfig: publicGameConfig });
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });

@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { GameProgressResponse, ServerGameAction, SnakeDirection, SnakeGameState } from '@/lib/games/state';
+import { runOnce } from '@/lib/games/callbacks';
 import { soundManager } from '@/lib/sound';
 import { usePausedGameClock } from './usePausedGameClock';
 
@@ -45,17 +46,17 @@ export default function SnakeGame({
   propsRef.current = { onAction, onWin, onLose, minSeconds, secondsElapsed };
 
   const notifyWin = useCallback(() => {
-    if (winNotifiedRef.current) return;
-    winNotifiedRef.current = true;
-    soundManager.playLevelClear();
-    propsRef.current.onWin();
+    runOnce(winNotifiedRef, () => {
+      soundManager.playLevelClear();
+      propsRef.current.onWin();
+    });
   }, []);
 
   const notifyLose = useCallback(() => {
-    if (loseNotifiedRef.current) return;
-    loseNotifiedRef.current = true;
-    soundManager.playDamage();
-    propsRef.current.onLose();
+    runOnce(loseNotifiedRef, () => {
+      soundManager.playDamage();
+      propsRef.current.onLose();
+    });
   }, []);
 
   const changeDirection = useCallback((direction: SnakeDirection) => {

@@ -339,13 +339,8 @@ export default function AdminDashboard() {
   }, [fetchData, fetchLeaderboard, fetchAuditLogs, fetchProjects, fetchGameLibrary, fetchPuzzles, fetchPreflight]);
 
   // Event control handler
-  const handleEventAction = async (action: 'start' | 'pause' | 'resume' | 'end' | 'reset' | 'reset_data') => {
+  const handleEventAction = async (action: 'start' | 'pause' | 'resume' | 'end' | 'reset') => {
     if (action === 'reset' && !confirm('WARNING: Are you sure you want to RESET the event state to Ready?')) {
-      return;
-    }
-    if (action === 'reset_data' && !confirm(
-      'PERMANENTLY clear all assignments, game sessions, scores, lifeline events, recovery puzzle attempts, and clue unlocks? Teams, projects, games, clues, questions, and audit history will be preserved.'
-    )) {
       return;
     }
     try {
@@ -509,14 +504,6 @@ export default function AdminDashboard() {
             title="Reset Event to Ready"
           >
             <RotateCcw className="w-3 h-3" />
-          </button>
-
-          <button
-            onClick={() => handleEventAction('reset_data')}
-            className="px-2 py-1.5 bg-retro-card border border-retro-red/60 text-retro-red font-pixel text-[9px] rounded hover:bg-retro-red/20"
-            title="Clear competition data while preserving teams, projects, games, clues, questions, and audit history"
-          >
-            RESET DATA
           </button>
 
           <button

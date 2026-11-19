@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { GameProgressResponse, PongGameState, ServerGameAction } from '@/lib/games/state';
+import { runOnce } from '@/lib/games/callbacks';
 import { usePausedGameClock } from './usePausedGameClock';
 import { soundManager } from '@/lib/sound';
 
@@ -48,16 +49,14 @@ export default function PongGame({
   propsRef.current = { onAction, onWin, onLose, minSeconds, secondsElapsed };
 
   const notifyWin = useCallback(() => {
-    if (winNotifiedRef.current) return;
-    winNotifiedRef.current = true;
-    soundManager.playLevelClear();
-    propsRef.current.onWin();
+    runOnce(winNotifiedRef, () => {
+      soundManager.playLevelClear();
+      propsRef.current.onWin();
+    });
   }, []);
 
   const notifyLose = useCallback(() => {
-    if (loseNotifiedRef.current) return;
-    loseNotifiedRef.current = true;
-    propsRef.current.onLose();
+    runOnce(loseNotifiedRef, () => propsRef.current.onLose());
   }, []);
 
   useEffect(() => {
@@ -132,6 +131,8 @@ export default function PongGame({
         } else if (!result) {
           setErrorMessage('Could not verify this Pong move. Retrying shortly.');
         }
+      } catch {
+        if (!disposed) setErrorMessage('Could not verify this Pong move. Retrying shortly.');
       } finally {
         busyRef.current = false;
         if (!disposed) timer = setTimeout(advance, ACTION_INTERVAL_MS);
@@ -216,19 +217,30 @@ export default function PongGame({
   }, []);
 
   const setPointerPosition = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (pausedRef.current || finishedRef.current) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     if (rect.height <= 0) return;
     const canvasY = (event.clientY - rect.top) * (canvas.height / rect.height);
-    pointerCenterRef.current = Math.max(50, Math.min(canvas.height - 50, canvasY));
+    const halfPaddle = stateRef.current.paddleHeight / 2;
+    pointerCenterRef.current = Math.max(halfPaddle, Math.min(canvas.height - halfPaddle, canvasY));
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (pausedRef.current || finishedRef.current) return;
     pointerActiveRef.current = true;
     event.currentTarget.setPointerCapture(event.pointerId);
     setPointerPosition(event);
   };
+
+  useEffect(() => {
+    if (isPaused || gameOver || gameWon) {
+      pointerActiveRef.current = false;
+      pointerCenterRef.current = null;
+      keysRef.current = { up: false, down: false };
+    }
+  }, [gameOver, gameWon, isPaused]);
 
   return (
     <div className="flex flex-col items-center justify-center p-4">
@@ -277,7 +289,7 @@ export default function PongGame({
         {gameOver && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/85">
             <h2 className="mb-2 font-pixel text-2xl text-retro-red motion-safe:animate-pulse">DEFLECTOR BREACHED</h2>
-            <p className="mb-4 font-pixel text-xs text-retro-muted">ATTEMPT FAILED · LIFELINE NOT SPENT</p>
+            <p className="mb-4 font-pixel text-xs text-retro-muted">ATTEMPT FAILED</p>
           </div>
         )}
         {gameWon && (

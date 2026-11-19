@@ -16,12 +16,49 @@ import {
 import {
   getGameCompletionPoints,
   getFailedAttemptDisposition,
-  isDuplicateProgressRequest,
+  getProgressRequestDisposition,
+  isNextProgressActionSequence,
   isRecoveryAnswerCorrect,
   isValidRecoveryQuestion,
   selectGamesForTeam,
 } from '../lib/games/rules.ts';
-import { getPuzzleImageExtension } from '../lib/storage/imageValidation.ts';
+import sharp from 'sharp';
+import {
+  getPuzzleImageExtension,
+  getValidatedPuzzleImageExtension,
+} from '../lib/storage/imageValidation.ts';
+import { runOnce } from '../lib/games/callbacks.ts';
+
+test('game completion callbacks run once when the same result is emitted repeatedly', () => {
+  const guard = { current: false };
+  let callbackCount = 0;
+  assert.equal(runOnce(guard, () => { callbackCount += 1; }), true);
+  assert.equal(runOnce(guard, () => { callbackCount += 1; }), false);
+  assert.equal(callbackCount, 1);
+});
+
+test('a first failure leaves the lifeline available until a retry is explicitly taken', () => {
+  const lifelinesRemaining = 1;
+  assert.equal(getFailedAttemptDisposition(1, lifelinesRemaining), 'LIFELINE_RETRY_AVAILABLE');
+  assert.equal(lifelinesRemaining, 1);
+  assert.equal(getGameCompletionPoints(1), 10);
+  assert.equal(getGameCompletionPoints(2), 5);
+  assert.equal(getFailedAttemptDisposition(2, 0), 'RECOVERY_PUZZLE_REQUIRED');
+});
+
+test('progress protocol treats exact retries as idempotent and rejects stale or forged reuse', () => {
+  assert.equal(
+    getProgressRequestDisposition(['request-1'], { 'request-1': '4:{"type":"pongStep"}' }, 'request-1', '4:{"type":"pongStep"}'),
+    'DUPLICATE'
+  );
+  assert.equal(
+    getProgressRequestDisposition(['request-1'], { 'request-1': '4:{"type":"pongStep"}' }, 'request-1', '4:{"type":"pongStep","input":"up"}'),
+    'REQUEST_ID_REUSED'
+  );
+  assert.equal(isNextProgressActionSequence(4, 5), true);
+  assert.equal(isNextProgressActionSequence(4, 4), false);
+  assert.equal(isNextProgressActionSequence(4, 6), false);
+});
 
 test('supported game catalog has six distinct playable entries', () => {
   const keys = GAME_CATALOG.map((game) => game.gameKey);
@@ -113,6 +150,23 @@ test('Pong awards only server-simulated points and detects a terminal loss', () 
   assert.equal(lost.state.failed, true);
 });
 
+test('Pong normal completion reaches the server target without a failure', () => {
+  const initial = createInitialGameState('pong');
+  assert.ok(initial && initial.gameKey === 'pong');
+  const finalPoint = advancePong({
+    ...initial,
+    playerScore: 2,
+    ballX: 438,
+    ballY: 250,
+    ballSpeedX: 5,
+    ballSpeedY: 0,
+    aiY: 0,
+  }, 'stay');
+  assert.equal(finalPoint.state.playerScore, finalPoint.state.target);
+  assert.equal(finalPoint.failed, false);
+  assert.equal(finalPoint.state.failed, false);
+});
+
 test('Memory owns its deck, validates selection order, and resets mismatches', () => {
   const initial = createInitialGameState('memory', (max) => max - 1);
   assert.ok(initial && initial.gameKey === 'memory');
@@ -144,6 +198,7 @@ test('competition helpers cover points, puzzle validation, duplicate actions, an
   assert.equal(getFailedAttemptDisposition(1, 1), 'LIFELINE_RETRY_AVAILABLE');
   assert.equal(getFailedAttemptDisposition(1, 0), 'RECOVERY_PUZZLE_REQUIRED');
   assert.equal(getFailedAttemptDisposition(2, 1), 'RECOVERY_PUZZLE_REQUIRED');
+  assert.equal(getFailedAttemptDisposition(2, 0), 'RECOVERY_PUZZLE_REQUIRED');
   assert.equal(isRecoveryAnswerCorrect('Arduino Uno', 'Arduino Uno'), true);
   assert.equal(isRecoveryAnswerCorrect('Arduino Uno', 'ESP32'), false);
   assert.equal(isValidRecoveryQuestion({
@@ -158,8 +213,16 @@ test('competition helpers cover points, puzzle validation, duplicate actions, an
     correctAnswer: 'missing',
     options: [{ optionText: 'Arduino Uno' }, { optionText: 'ESP32' }],
   }), false);
-  assert.equal(isDuplicateProgressRequest(['request-1'], 'request-1'), true);
-  assert.equal(isDuplicateProgressRequest(['request-1'], 'request-2'), false);
+  assert.equal(getProgressRequestDisposition(['request-1'], {}, 'request-1', 'a'), 'DUPLICATE');
+  assert.equal(
+    getProgressRequestDisposition(['request-1'], { 'request-1': 'a' }, 'request-1', 'b'),
+    'REQUEST_ID_REUSED'
+  );
+  assert.equal(getProgressRequestDisposition(['request-1'], {}, 'request-2', 'b'), 'NEW');
+  assert.equal(isNextProgressActionSequence(4, 5), true);
+  assert.equal(isNextProgressActionSequence(4, 4), false);
+  assert.equal(isNextProgressActionSequence(4, 6), false);
+  assert.equal(isNextProgressActionSequence(4, Number.NaN), false);
 
   let seed = 41;
   const randomIndex = (max) => {
@@ -178,9 +241,27 @@ test('competition helpers cover points, puzzle validation, duplicate actions, an
   assert.ok(Math.max(...counts.values()) - Math.min(...counts.values()) <= 1);
 });
 
-test('puzzle image upload accepts supported signatures and rejects mismatches or oversized files', () => {
+test('puzzle image upload checks signatures, decoded contents, and size', async () => {
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   assert.equal(getPuzzleImageExtension(pngSignature, 'image/png'), 'png');
   assert.equal(getPuzzleImageExtension(pngSignature, 'image/jpeg'), null);
   assert.equal(getPuzzleImageExtension(Buffer.alloc(2 * 1024 * 1024 + 1), 'image/png'), null);
+
+  const validPng = await sharp({
+    create: {
+      width: 1,
+      height: 1,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 1 },
+    },
+  }).png().toBuffer();
+  assert.equal(await getValidatedPuzzleImageExtension(validPng, 'image/png'), 'png');
+  assert.equal(
+    await getValidatedPuzzleImageExtension(Buffer.concat([pngSignature, Buffer.alloc(20)]), 'image/png'),
+    null
+  );
+  assert.equal(
+    await getValidatedPuzzleImageExtension(Buffer.alloc(2 * 1024 * 1024 + 1), 'image/png'),
+    null
+  );
 });
