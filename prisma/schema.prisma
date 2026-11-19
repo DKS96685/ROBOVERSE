@@ -1,0 +1,267 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+model Admin {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  password_hash String
+  name          String
+  created_at    DateTime @default(now())
+}
+
+model Team {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  login_id      String   @unique
+  password_hash String
+  project_id    String?
+  active        Boolean  @default(true)
+  created_at    DateTime @default(now())
+
+  members         Member[]
+  team_games      TeamGame[]
+  game_sessions   GameSession[]
+  lifeline_events LifelineEvent[]
+  audit_logs      AuditLog[]
+  recovery_puzzles RecoveryPuzzle[]
+  puzzle_attempts  RecoveryPuzzleAttempt[]
+  clue_unlocks     ProjectClueUnlock[]
+  team_score       TeamScore?
+  project         Project? @relation(fields: [project_id], references: [id], onDelete: SetNull)
+
+  @@index([project_id])
+}
+
+model Project {
+  id           String @id @default(uuid())
+  name         String @unique
+  description  String
+
+  teams        Team[]
+  hints        ProjectHint[]
+  clue_unlocks ProjectClueUnlock[]
+}
+
+model ProjectHint {
+  id         String   @id @default(uuid())
+  project_id String
+  game_id    String
+  clue_text  String
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  game    Game    @relation(fields: [game_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, game_id])
+  @@index([game_id])
+}
+
+model Member {
+  id      String @id @default(uuid())
+  team_id String
+  name    String
+
+  team Team @relation(fields: [team_id], references: [id], onDelete: Cascade)
+}
+
+model Game {
+  id          String  @id @default(uuid())
+  game_key    String  @unique
+  title       String
+  type        String  @default("clue")
+  clue_text   String  @default("")
+  min_seconds Int     @default(15)
+  enabled     Boolean @default(true)
+  order_num   Int     @default(1)
+
+  team_games      TeamGame[]
+  game_sessions   GameSession[]
+  lifeline_events LifelineEvent[]
+  hints           ProjectHint[]
+  clue_unlocks    ProjectClueUnlock[]
+}
+
+model GameSession {
+  id               String    @id @default(uuid())
+  team_id          String
+  game_id          String
+  team_game_id     String?
+  attempt_number   Int       @default(1)
+  started_at       DateTime  @default(now())
+  ended_at         DateTime?
+  result           String?
+  duration_s       Int?
+  progress         Int       @default(0)
+  validated_target Int       @default(3)
+  winning_state    String?
+  game_state       Json?
+  pause_started_at DateTime?
+  paused_seconds   Int       @default(0)
+  submission_key   String?
+
+  team Team @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  game Game @relation(fields: [game_id], references: [id], onDelete: Cascade)
+
+  @@unique([team_id, team_game_id, attempt_number])
+  @@index([team_id, result])
+}
+
+model TeamGame {
+  id                String    @id @default(uuid())
+  team_id           String
+  game_id           String
+  assignment_run_id String?
+  assigned_order    Int       @default(0)
+  required          Boolean   @default(false)
+  status            String    @default("NOT_STARTED")
+  points            Int       @default(0)
+  attempt_count     Int       @default(0)
+  lifeline_used     Boolean   @default(false)
+  started_at        DateTime?
+  completed_at      DateTime?
+  updated_by        String    @default("system")
+  updated_at        DateTime  @updatedAt
+
+  team Team @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  game Game @relation(fields: [game_id], references: [id], onDelete: Cascade)
+  recovery_puzzles RecoveryPuzzle[]
+  clue_unlocks     ProjectClueUnlock[]
+
+  @@unique([team_id, game_id])
+  @@unique([assignment_run_id, team_id, assigned_order])
+  @@index([team_id, status])
+}
+
+model LifelineEvent {
+  id         String   @id @default(uuid())
+  team_id    String
+  game_id    String?
+  team_game_id String?
+  session_id String?
+  action     String   // "used" or "reverted"
+  amount     Float    @default(1.0)
+  by_admin   Boolean  @default(false)
+  note       String?
+  created_at DateTime @default(now())
+
+  team Team  @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  game Game? @relation(fields: [game_id], references: [id], onDelete: SetNull)
+}
+
+model EventState {
+  id                   String    @id @default("global")
+  status               String    @default("ready") // "ready", "running", "paused", "ended"
+  started_at           DateTime?
+  paused_at            DateTime?
+  total_paused_seconds Int       @default(0)
+  updated_at           DateTime  @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actor      String
+  action     String
+  team_id    String?
+  before     String?  // JSON string
+  after      String?  // JSON string
+  created_at DateTime @default(now())
+
+  team Team? @relation(fields: [team_id], references: [id], onDelete: SetNull)
+}
+
+model ComponentQuestion {
+  id            String   @id @default(uuid())
+  question_text String
+  image_url     String
+  correct_answer String
+  enabled       Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  options  ComponentAnswerOption[]
+  puzzles  RecoveryPuzzle[]
+}
+
+model ComponentAnswerOption {
+  id          String @id @default(uuid())
+  question_id String
+  option_text String
+  sort_order  Int    @default(0)
+
+  question ComponentQuestion @relation(fields: [question_id], references: [id], onDelete: Cascade)
+
+  @@unique([question_id, option_text])
+  @@index([question_id, sort_order])
+}
+
+model RecoveryPuzzle {
+  id            String    @id @default(uuid())
+  team_id       String
+  team_game_id  String
+  question_id   String
+  status        String    @default("PENDING")
+  completed_at  DateTime?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  team      Team               @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  team_game TeamGame           @relation(fields: [team_game_id], references: [id], onDelete: Cascade)
+  question  ComponentQuestion  @relation(fields: [question_id], references: [id], onDelete: Restrict)
+  attempts  RecoveryPuzzleAttempt[]
+
+  @@unique([team_id, team_game_id])
+  @@index([question_id])
+}
+
+model RecoveryPuzzleAttempt {
+  id                 String   @id @default(uuid())
+  puzzle_id          String
+  team_id            String
+  selected_answer    String
+  is_correct         Boolean
+  attempted_at       DateTime @default(now())
+
+  puzzle RecoveryPuzzle @relation(fields: [puzzle_id], references: [id], onDelete: Cascade)
+  team   Team           @relation(fields: [team_id], references: [id], onDelete: Cascade)
+
+  @@index([puzzle_id, attempted_at])
+  @@index([team_id, attempted_at])
+}
+
+model ProjectClueUnlock {
+  id            String   @id @default(uuid())
+  team_id       String
+  project_id    String
+  game_id       String
+  team_game_id  String
+  reason        String
+  unlocked_at   DateTime @default(now())
+
+  team      Team     @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  project   Project  @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  game      Game     @relation(fields: [game_id], references: [id], onDelete: Cascade)
+  team_game TeamGame @relation(fields: [team_game_id], references: [id], onDelete: Cascade)
+
+  @@unique([team_id, project_id, game_id])
+  @@index([team_id, unlocked_at])
+}
+
+model TeamScore {
+  id                  String    @id @default(uuid())
+  team_id             String    @unique
+  total_points        Int       @default(0)
+  completed_games     Int       @default(0)
+  lifeline_used       Boolean   @default(false)
+  completed_at        DateTime?
+  updated_at          DateTime  @updatedAt
+
+  team Team @relation(fields: [team_id], references: [id], onDelete: Cascade)
+}
