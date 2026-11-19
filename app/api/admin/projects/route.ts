@@ -128,7 +128,7 @@ export async function POST(req: NextRequest) {
           },
         });
         return created;
-      }, { isolationLevel: 'Serializable' });
+      }, { timeout: 20000 });
 
       return NextResponse.json({ success: true, project });
     }
@@ -168,7 +168,7 @@ export async function POST(req: NextRequest) {
           },
         });
         return updated;
-      });
+      }, { timeout: 20000 });
 
       return NextResponse.json({ success: true, project });
     }
