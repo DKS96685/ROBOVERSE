@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
-import { GAME_RULES } from '@/lib/config/gameRules';
+import { getGameProgressTarget } from '@/lib/config/gameCatalog';
+import { createInitialGameState, getPublicGameState } from '@/lib/games/state';
 import { gameStartSchema } from '@/lib/validations';
 
 export async function POST(req: NextRequest) {
@@ -53,19 +55,35 @@ export async function POST(req: NextRequest) {
           return { error: 'Complete the previous assigned game first.', status: 409 };
         }
       }
-      if (!['NOT_STARTED', 'FIRST_ATTEMPT_FAILED'].includes(teamGame.status)) {
-        return { error: 'Game cannot be started in its current state.', status: 400 };
-      }
       if (teamGame.status === 'FIRST_ATTEMPT_FAILED') {
         return { error: 'Use the lifeline retry action after a first failure.', status: 409 };
       }
 
       const activeSession = await tx.gameSession.findFirst({
         where: { team_id: session.teamId!, team_game_id: teamGame.id, result: 'in_progress' },
-        select: { id: true },
+        orderBy: { started_at: 'desc' },
       });
-      if (activeSession) return { error: 'This team already has an active game session.', status: 409 };
+      if (activeSession) {
+        return {
+          session: activeSession,
+          minSeconds: teamGame.game.min_seconds,
+          resumed: true,
+          gameConfig: activeSession.game_state,
+        };
+      }
 
+      if (teamGame.status !== 'NOT_STARTED') {
+        return { error: 'Game cannot be started in its current state.', status: 400 };
+      }
+
+      const target = getGameProgressTarget(teamGame.game.game_key);
+      const gameConfig = createInitialGameState(
+        teamGame.game.game_key,
+        (max) => crypto.randomInt(max)
+      );
+      if (!gameConfig) {
+        return { error: 'This game does not have a supported server-verified implementation.', status: 409 };
+      }
       const gameSession = await tx.gameSession.create({
         data: {
           team_id: session.teamId!,
@@ -74,8 +92,8 @@ export async function POST(req: NextRequest) {
           attempt_number: 1,
           result: 'in_progress',
           progress: 0,
-          validated_target: 3,
-          game_state: { target: 3, gameKey: teamGame.game.game_key },
+          validated_target: target,
+          game_state: JSON.parse(JSON.stringify(gameConfig)) as Prisma.InputJsonValue,
         },
       });
       await tx.teamGame.update({
@@ -86,17 +104,32 @@ export async function POST(req: NextRequest) {
           started_at: teamGame.started_at || new Date(),
         },
       });
-      return { session: gameSession, minSeconds: teamGame.game.min_seconds };
+      return {
+        session: gameSession,
+        minSeconds: teamGame.game.min_seconds,
+        resumed: false,
+        gameConfig,
+      };
     }, { isolationLevel: 'Serializable' });
 
     if ('error' in result) {
       return NextResponse.json({ error: result.error }, { status: result.status });
+    }
+    const publicGameConfig = getPublicGameState(result.gameConfig);
+    if (!publicGameConfig) {
+      return NextResponse.json(
+        { error: 'This game session has no valid server state. Contact an administrator.' },
+        { status: 409 }
+      );
     }
 
     return NextResponse.json({
       sessionId: result.session.id,
       startedAt: result.session.started_at,
       minSeconds: result.minSeconds,
+      progress: result.session.progress,
+      resumed: result.resumed,
+      gameConfig: publicGameConfig,
     });
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {

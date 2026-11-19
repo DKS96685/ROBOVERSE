@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test:games": "node --test scripts/game-state.test.mjs",
     "db:push": "prisma db push",
     "prisma:migrate": "prisma migrate deploy",
     "create-admin": "node scripts/create-admin.js"

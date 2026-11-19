@@ -1,22 +1,17 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { GameProgressResponse, MemoryGameState, ServerGameAction } from '@/lib/games/state';
 import { soundManager } from '@/lib/sound';
+import { usePausedGameClock } from './usePausedGameClock';
 
 interface MemoryMatchGameProps {
+  initialState: MemoryGameState;
+  onAction: (action: ServerGameAction) => Promise<GameProgressResponse | null>;
   onWin: () => void;
   onLose: () => void;
-  onProgress: (action: 'memoryPairMatched') => Promise<boolean>;
   minSeconds: number;
   isPaused: boolean;
-}
-
-interface CardItem {
-  id: number;
-  symbol: string;
-  name: string;
-  isFlipped: boolean;
-  isMatched: boolean;
 }
 
 const SYMBOLS = [
@@ -25,218 +20,224 @@ const SYMBOLS = [
   { symbol: '⚙️', name: 'GEAR' },
 ];
 
-const PREVIEW_SECONDS = 4;
-
-function createDeck(): CardItem[] {
-  const deck = SYMBOLS.flatMap((item, symbolIndex) =>
-    [0, 1].map((copy) => ({
-      id: symbolIndex * 2 + copy,
-      symbol: item.symbol,
-      name: item.name,
-      isFlipped: true,
-      isMatched: false,
-    }))
-  );
-
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
-  return deck;
+function symbolForCard(state: MemoryGameState, index: number): number | undefined {
+  return state.revealedCards.find((card) => card.index === index)?.symbolIndex;
 }
 
-export default function MemoryMatchGame({ onWin, onLose, onProgress, minSeconds, isPaused }: MemoryMatchGameProps) {
-  const [cards, setCards] = useState<CardItem[]>(createDeck);
-  const [flippedIndices, setFlippedIndices] = useState<number[]>([]);
-  const [resolvingPair, setResolvingPair] = useState(false);
-  const [matchesCount, setMatchesCount] = useState(0);
-  const [secondsElapsed, setSecondsElapsed] = useState(0);
-  const [previewSeconds, setPreviewSeconds] = useState(PREVIEW_SECONDS);
-  const [gameWon, setGameWon] = useState(false);
+export default function MemoryMatchGame({
+  initialState,
+  onAction,
+  onWin,
+  onLose,
+  minSeconds,
+  isPaused,
+}: MemoryMatchGameProps) {
+  const [gameState, setGameState] = useState(initialState);
+  const [resolvingPair, setResolvingPair] = useState(initialState.mismatch);
+  const [gameWon, setGameWon] = useState(initialState.matchedIndices.length === 6);
   const [waitingForMinimum, setWaitingForMinimum] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const { secondsElapsed } = usePausedGameClock(isPaused);
+
   const pausedRef = useRef(isPaused);
-  const flippedRef = useRef<number[]>([]);
-  const resolvingRef = useRef(false);
+  const busyRef = useRef(false);
+  const finishedRef = useRef(false);
   const winNotifiedRef = useRef(false);
-  const previewRef = useRef(true);
-  const secondsElapsedRef = useRef(0);
-  const pendingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const progressPromiseRef = useRef<Promise<boolean> | null>(null);
+  const loseNotifiedRef = useRef(false);
+  const mismatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disposedRef = useRef(false);
+  const propsRef = useRef({ onAction, onWin, onLose, minSeconds, secondsElapsed });
+  pausedRef.current = isPaused;
+  propsRef.current = { onAction, onWin, onLose, minSeconds, secondsElapsed };
 
-  useEffect(() => {
-    pausedRef.current = isPaused;
-  }, [isPaused]);
+  const notifyWin = useCallback(() => {
+    if (winNotifiedRef.current) return;
+    winNotifiedRef.current = true;
+    soundManager.playLevelClear();
+    propsRef.current.onWin();
+  }, []);
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (pausedRef.current) return;
+  const notifyLose = useCallback(() => {
+    if (loseNotifiedRef.current) return;
+    loseNotifiedRef.current = true;
+    propsRef.current.onLose();
+  }, []);
 
-      secondsElapsedRef.current += 1;
-      setSecondsElapsed(secondsElapsedRef.current);
-      if (previewRef.current) {
-        setPreviewSeconds((remaining) => {
-          if (remaining <= 1) {
-            previewRef.current = false;
-            setCards((current) => current.map((card) => ({ ...card, isFlipped: false })));
-            return 0;
-          }
-          return remaining - 1;
-        });
+  const updateFromResponse = useCallback((response: GameProgressResponse) => {
+    if (response.gameState?.gameKey !== 'memory') return false;
+    setGameState(response.gameState);
+    setErrorMessage('');
+    if (response.winningReady) {
+      finishedRef.current = true;
+      setGameWon(true);
+      if (propsRef.current.secondsElapsed >= propsRef.current.minSeconds) {
+        notifyWin();
+      } else {
+        setWaitingForMinimum(true);
       }
-    }, 1000);
-    return () => clearInterval(timer);
+    }
+    return true;
+  }, [notifyWin]);
+
+  useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+      if (mismatchTimerRef.current) clearTimeout(mismatchTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
-    if (waitingForMinimum && secondsElapsed >= minSeconds && !winNotifiedRef.current) {
-      winNotifiedRef.current = true;
+    if (!gameState.mismatch || disposedRef.current) return;
+    const resetAfterDelay = () => {
+      mismatchTimerRef.current = setTimeout(async () => {
+        if (disposedRef.current) return;
+        if (pausedRef.current) {
+          resetAfterDelay();
+          return;
+        }
+        if (busyRef.current) {
+          resetAfterDelay();
+          return;
+        }
+        busyRef.current = true;
+        try {
+          const result = await propsRef.current.onAction({ type: 'memoryResetSelection' });
+          if (disposedRef.current) return;
+          if (result && updateFromResponse(result)) {
+            setResolvingPair(false);
+          } else {
+            setErrorMessage('Could not reset the mismatched cards. Please try again.');
+            resetAfterDelay();
+          }
+        } finally {
+          busyRef.current = false;
+        }
+      }, 900);
+    };
+    resetAfterDelay();
+    return () => {
+      if (mismatchTimerRef.current) clearTimeout(mismatchTimerRef.current);
+    };
+  }, [gameState.mismatch, updateFromResponse]);
+
+  useEffect(() => {
+    if (waitingForMinimum && secondsElapsed >= minSeconds) {
       setWaitingForMinimum(false);
-      soundManager.playLevelClear();
-      void (progressPromiseRef.current || Promise.resolve(true)).then((ready) => {
-        if (ready) onWin();
-      });
+      notifyWin();
     }
-  }, [minSeconds, onWin, secondsElapsed, waitingForMinimum]);
+  }, [minSeconds, notifyWin, secondsElapsed, waitingForMinimum]);
 
-  useEffect(() => () => {
-    if (pendingTimeoutRef.current) clearTimeout(pendingTimeoutRef.current);
-  }, []);
+  useEffect(() => {
+    if (initialState.matchedIndices.length < initialState.cardCount) return;
+    finishedRef.current = true;
+    setGameWon(true);
+    setWaitingForMinimum(true);
+  }, [initialState.cardCount, initialState.matchedIndices.length]);
 
-  const handleCardClick = (index: number) => {
+  useEffect(() => {
+    if (secondsElapsed >= 120 && !finishedRef.current) {
+      finishedRef.current = true;
+      notifyLose();
+    }
+  }, [notifyLose, secondsElapsed]);
+
+  const handleCardClick = async (index: number) => {
     if (
-      pausedRef.current ||
-      previewRef.current ||
-      gameWon ||
-      resolvingRef.current ||
-      flippedRef.current.length >= 2
+      pausedRef.current
+      || finishedRef.current
+      || resolvingPair
+      || busyRef.current
+      || symbolForCard(gameState, index) !== undefined
+      || gameState.matchedIndices.includes(index)
     ) return;
 
-    const selected = cards[index];
-    if (!selected || selected.isMatched || selected.isFlipped) return;
-
-    soundManager.playBeep(480, 0.05);
-    const firstSelection = flippedRef.current.length === 0;
-    const nextFlipped = [...flippedRef.current, index];
-    flippedRef.current = nextFlipped;
-    setFlippedIndices(nextFlipped);
-    setCards((current) => current.map((card, cardIndex) =>
-      cardIndex === index ? { ...card, isFlipped: true } : card
-    ));
-
-    if (firstSelection) return;
-
-    resolvingRef.current = true;
-    setResolvingPair(true);
-    const firstIndex = nextFlipped[0];
-    const isMatch = cards[firstIndex].symbol === selected.symbol;
-
-    const resolvePair = () => {
-      if (pausedRef.current) {
-        pendingTimeoutRef.current = setTimeout(resolvePair, 200);
+    busyRef.current = true;
+    try {
+      const result = await propsRef.current.onAction({ type: 'memoryFlip', index });
+      if (!result || !updateFromResponse(result)) {
+        setErrorMessage('Could not verify this card selection. Please try again.');
         return;
       }
-
-      if (isMatch) {
-        soundManager.playCoin();
-        setCards((current) => current.map((card, cardIndex) =>
-          cardIndex === firstIndex || cardIndex === index
-            ? { ...card, isMatched: true, isFlipped: true }
-            : card
-        ));
-        const nextCount = matchesCount + 1;
-        setMatchesCount(nextCount);
-        const progressPromise = onProgress('memoryPairMatched');
-        progressPromiseRef.current = progressPromise;
-        if (nextCount === SYMBOLS.length) {
-          setGameWon(true);
-          if (secondsElapsedRef.current >= minSeconds) {
-            winNotifiedRef.current = true;
-            soundManager.playLevelClear();
-            void progressPromise.then((ready) => {
-              if (ready) onWin();
-            });
-          } else {
-            setWaitingForMinimum(true);
-          }
+      if (result.gameState?.gameKey === 'memory') {
+        if (result.gameState.mismatch) {
+          setResolvingPair(true);
+          soundManager.playDamage();
+        } else if (result.progress > gameState.matchedIndices.length / 2) {
+          setResolvingPair(false);
+          soundManager.playCoin();
+        } else {
+          soundManager.playBeep(480, 0.05);
         }
-      } else {
-        soundManager.playDamage();
-        setCards((current) => current.map((card, cardIndex) =>
-          cardIndex === firstIndex || cardIndex === index
-            ? { ...card, isFlipped: false }
-            : card
-        ));
       }
+    } finally {
+      busyRef.current = false;
+    }
+  };
 
-      flippedRef.current = [];
-      setFlippedIndices([]);
-      resolvingRef.current = false;
-      setResolvingPair(false);
-    };
-
-    pendingTimeoutRef.current = setTimeout(resolvePair, isMatch ? 450 : 1000);
+  const handleForfeit = () => {
+    if (pausedRef.current || finishedRef.current) return;
+    finishedRef.current = true;
+    notifyLose();
   };
 
   return (
     <div className="flex flex-col items-center justify-center p-4">
-      <div className="flex items-center justify-between w-full max-w-[440px] mb-3 px-4 py-2 bg-retro-card border border-retro-cyan/40 rounded">
+      <div className="mb-3 flex w-full max-w-[440px] items-center justify-between rounded border border-retro-cyan/40 bg-retro-card px-4 py-2">
         <div>
-          <span className="text-sm text-retro-cyan font-pixel">PAIRS: </span>
-          <span className="font-pixel text-retro-yellow text-sm font-bold">
-            {matchesCount}/3
-          </span>
+          <span className="font-pixel text-sm text-retro-cyan">PAIRS: </span>
+          <span className="font-pixel text-sm font-bold text-retro-yellow">{gameState.matchedIndices.length / 2}/3</span>
         </div>
         <div>
-          <span className="text-sm text-retro-muted font-pixel">TIME: </span>
+          <span className="font-pixel text-sm text-retro-muted">TIME: </span>
           <span className={`font-pixel text-sm font-bold ${secondsElapsed < minSeconds ? 'text-retro-amber' : 'text-retro-green'}`}>
             {secondsElapsed}s / {minSeconds}s
           </span>
         </div>
       </div>
 
-      <p className="mb-3 text-sm text-retro-cyan font-pixel text-center" aria-live="polite">
-        {previewRef.current && previewSeconds > 0
-          ? `MEMORIZE THE CARDS: ${previewSeconds}s`
-          : resolvingPair ? 'CHECKING PAIR...' : 'MATCH 3 PAIRS'}
+      <p className="mb-3 text-center font-pixel text-sm text-retro-cyan" aria-live="polite">
+        {resolvingPair ? 'CHECKING PAIR...' : 'MATCH 3 PAIRS'}
       </p>
+      {errorMessage && <p className="mb-2 text-center text-xs text-retro-amber" aria-live="polite">{errorMessage}</p>}
 
-      <div className="relative p-3 bg-retro-bg border-2 border-retro-cyan shadow-neon-cyan rounded grid grid-cols-3 gap-3 max-w-[440px]">
-        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.35)_50%)] bg-[length:100%_4px] opacity-30 rounded" />
-        {cards.map((card, index) => {
-          const isOpen = card.isFlipped || card.isMatched;
+      <div className="relative grid w-full max-w-[440px] grid-cols-3 gap-3 rounded border-2 border-retro-cyan bg-retro-bg p-3 shadow-neon-cyan">
+        <div className="pointer-events-none absolute inset-0 rounded bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.35)_50%)] bg-[length:100%_4px] opacity-30" />
+        {Array.from({ length: 6 }, (_, index) => {
+          const symbolIndex = symbolForCard(gameState, index);
+          const isMatched = gameState.matchedIndices.includes(index);
+          const isOpen = symbolIndex !== undefined;
+          const symbol = symbolIndex === undefined ? null : SYMBOLS[symbolIndex];
           return (
             <button
-              key={card.id}
-              onClick={() => handleCardClick(index)}
-              disabled={isPaused || previewRef.current || isOpen || resolvingPair || gameWon}
-              aria-label={isOpen ? `${card.name}${card.isMatched ? ', matched' : ''}` : 'Hidden card'}
-              className={`w-24 h-24 sm:w-28 sm:h-28 rounded border flex flex-col items-center justify-center transition-all duration-200 select-none touch-manipulation disabled:cursor-default ${
-                card.isMatched
-                  ? 'bg-retro-card border-retro-green shadow-neon-green opacity-90'
+              key={index}
+              onClick={() => void handleCardClick(index)}
+              disabled={isPaused || resolvingPair || gameWon || isOpen || isMatched || busyRef.current}
+              aria-label={isOpen && symbol ? `${symbol.name}${isMatched ? ', matched' : ''}` : 'Hidden card'}
+              className={`h-20 w-full touch-manipulation select-none rounded border transition-all duration-200 disabled:cursor-default sm:h-28 ${
+                isMatched
+                  ? 'border-retro-green bg-retro-card opacity-90 shadow-neon-green'
                   : isOpen
-                  ? 'bg-retro-card border-retro-cyan shadow-neon-cyan'
-                  : 'bg-[#0d1020] border-retro-border hover:border-retro-cyan/60 active:scale-95'
+                    ? 'border-retro-cyan bg-retro-card shadow-neon-cyan'
+                    : 'border-retro-border bg-[#0d1020] hover:border-retro-cyan/60 active:scale-95'
               }`}
             >
-              {isOpen ? (
+              {isOpen && symbol ? (
                 <>
-                  <span className="text-3xl mb-1">{card.symbol}</span>
-                  <span className="text-[10px] font-pixel text-retro-cyan">
-                    {card.name}
-                  </span>
-                  {card.isMatched && <span className="text-xs text-retro-green font-pixel">MATCHED</span>}
+                  <span className="mb-1 block text-2xl sm:text-3xl">{symbol.symbol}</span>
+                  <span className="block font-pixel text-[10px] text-retro-cyan">{symbol.name}</span>
+                  {isMatched && <span className="font-pixel text-xs text-retro-green">MATCHED</span>}
                 </>
               ) : (
-                <span className="font-pixel text-retro-muted text-lg">?</span>
+                <span className="font-pixel text-lg text-retro-muted">?</span>
               )}
             </button>
           );
         })}
-
         {gameWon && (
-          <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center rounded text-center p-3">
-            <h2 className="font-pixel text-retro-green text-xl mb-2 motion-safe:animate-bounce">3 PAIRS MATCHED!</h2>
-            <p className="text-sm text-retro-cyan font-pixel">
+          <div className="absolute inset-0 flex flex-col items-center justify-center rounded bg-black/85 p-3 text-center">
+            <h2 className="mb-2 font-pixel text-xl text-retro-green motion-safe:animate-bounce">3 PAIRS MATCHED!</h2>
+            <p className="font-pixel text-sm text-retro-cyan">
               {waitingForMinimum ? `MINIMUM TIME ${secondsElapsed}s / ${minSeconds}s` : 'WIN SUBMITTING...'}
             </p>
           </div>
@@ -244,11 +245,11 @@ export default function MemoryMatchGame({ onWin, onLose, onProgress, minSeconds,
       </div>
 
       <button
-        onClick={onLose}
-        disabled={isPaused || gameWon || resolvingPair}
-        className="mt-4 px-4 py-3 text-sm font-pixel text-retro-red/80 hover:text-retro-red underline uppercase disabled:opacity-40"
+        onClick={handleForfeit}
+        disabled={isPaused || gameWon || resolvingPair || gameState.moves === 0}
+        className="mt-4 px-4 py-3 font-pixel text-sm uppercase text-retro-red/80 underline hover:text-retro-red disabled:opacity-40"
       >
-        FORFEIT GAME (-1 LIFELINE & REVEAL CLUE)
+        END THIS ATTEMPT (NO LIFELINE DEDUCTED)
       </button>
     </div>
   );

@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { soundManager } from '@/lib/sound';
 import GameModal from '@/components/games/GameModal';
+import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
 import {
   Heart,
   Clock,
@@ -333,8 +334,9 @@ export default function TeamDashboard() {
               const isAvailable =
                 g.status === 'available'
                 || g.status === 'NOT_STARTED'
-                || g.status === 'IN_PROGRESS'
-                || g.status === 'FIRST_ATTEMPT_FAILED'
+                || g.status === 'FIRST_ATTEMPT_FAILED';
+              const isInProgress =
+                g.status === 'IN_PROGRESS'
                 || g.status === 'SECOND_ATTEMPT_IN_PROGRESS';
               const isPendingPuzzle = g.status === 'PENDING_RECOVERY_PUZZLE';
 
@@ -346,7 +348,7 @@ export default function TeamDashboard() {
                       ? 'border-retro-green/60 shadow-[0_0_10px_rgba(0,255,102,0.15)]'
                       : isSkipped
                       ? 'border-retro-amber/60'
-                      : isAvailable
+                      : isAvailable || isInProgress
                       ? 'border-retro-cyan shadow-neon-cyan'
                       : 'border-retro-border opacity-50'
                   }`}
@@ -369,10 +371,15 @@ export default function TeamDashboard() {
                       )}
                       {isAvailable && (
                         <span className="px-2 py-0.5 rounded text-[9px] font-pixel bg-retro-cyan/10 text-retro-cyan border border-retro-cyan/40 animate-pulse">
-                          READY
+                          {g.status === 'FIRST_ATTEMPT_FAILED' ? 'RETRY AVAILABLE' : 'READY'}
                         </span>
                       )}
-                      {!isCompleted && !isSkipped && !isAvailable && !isPendingPuzzle && (
+                      {isInProgress && (
+                        <span className="px-2 py-0.5 rounded text-[9px] font-pixel bg-retro-cyan/10 text-retro-cyan border border-retro-cyan/40">
+                          IN PROGRESS
+                        </span>
+                      )}
+                      {!isCompleted && !isSkipped && !isAvailable && !isInProgress && !isPendingPuzzle && (
                         <span className="px-2 py-0.5 rounded text-[9px] font-pixel bg-retro-border text-retro-muted flex items-center gap-1">
                           <Lock className="w-3 h-3" /> LOCKED
                         </span>
@@ -386,11 +393,7 @@ export default function TeamDashboard() {
 
                     <h3 className="font-pixel text-xs text-white mb-2">{g.title}</h3>
                     <p className="text-[11px] font-mono text-retro-muted mb-4">
-                      {g.gameKey === 'snake'
-                        ? 'Guide the Cyber Serpent to collect 3 data dots without crashing.'
-                        : g.gameKey === 'pong'
-                        ? 'Deflect energy pulses against the CPU paddle to reach 3 points.'
-                        : 'Match 3 pairs to decrypt robotic actuation nodes.'}
+                      {getGameCatalogEntry(g.gameKey)?.description || 'Complete this assigned challenge to unlock its project clue.'}
                     </p>
 
                     {/* Unlocked Clue View */}
@@ -423,22 +426,23 @@ export default function TeamDashboard() {
                       >
                         SOLVE RECOVERY PUZZLE
                       </button>
-                    ) : isAvailable ? (
+                    ) : isAvailable || isInProgress ? (
                       <button
                         onClick={() => setSelectedGame(g)}
                         disabled={false}
                         className="w-full py-2.5 px-3 bg-retro-cyan text-retro-bg hover:bg-white font-pixel text-[11px] rounded font-bold shadow-neon-cyan active:scale-95 transition-all flex items-center justify-center gap-2 disabled:opacity-40"
                       >
                         <Play className="w-3.5 h-3.5 fill-current" />
-                        INSERT COIN / PLAY
+                        {isInProgress
+                          ? 'RESUME GAME'
+                          : g.status === 'FIRST_ATTEMPT_FAILED'
+                          ? 'USE LIFELINE RETRY'
+                          : 'INSERT COIN / PLAY'}
                       </button>
                     ) : (isCompleted || isSkipped) ? (
-                      <button
-                        onClick={() => setSelectedGame(g)}
-                        className="w-full py-2 px-3 bg-retro-card border border-retro-border text-retro-muted hover:text-white font-pixel text-[10px] rounded transition-all"
-                      >
-                        RE-READ CLUE / REPLAY
-                      </button>
+                      <div className="w-full py-2 px-3 border border-retro-border text-retro-muted text-center font-pixel text-[10px] rounded">
+                        GAME COMPLETE · {g.points || 0} POINTS
+                      </div>
                     ) : (
                       <div className="text-center py-2 text-[10px] font-pixel text-retro-muted">
                         COMPLETE CHALLENGE 0{g.orderNum - 1} TO UNLOCK

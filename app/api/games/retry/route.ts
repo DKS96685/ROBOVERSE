@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
+import { Prisma } from '@prisma/client';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { GAME_RULES } from '@/lib/config/gameRules';
+import { getGameProgressTarget } from '@/lib/config/gameCatalog';
+import { createInitialGameState, getPublicGameState } from '@/lib/games/state';
 
 export async function POST(req: NextRequest) {
   try {
@@ -55,22 +59,38 @@ export async function POST(req: NextRequest) {
         return { error: 'The team lifeline has already been spent.', status: 409 };
       }
 
-      const existingUse = await tx.lifelineEvent.findFirst({
-        where: {
+      const target = getGameProgressTarget(teamGame.game.game_key);
+      const gameConfig = createInitialGameState(
+        teamGame.game.game_key,
+        (max) => crypto.randomInt(max)
+      );
+      if (!gameConfig) {
+        return { error: 'This game does not have a supported server-verified implementation.', status: 409 };
+      }
+      const lastAttempt = await tx.gameSession.aggregate({
+        where: { team_id: session.teamId!, team_game_id: teamGame.id },
+        _max: { attempt_number: true },
+      });
+      const attemptNumber = (lastAttempt._max.attempt_number || 1) + 1;
+      const gameSession = await tx.gameSession.create({
+        data: {
           team_id: session.teamId!,
-          action: 'used',
           game_id: gameId,
+          team_game_id: teamGame.id,
+          attempt_number: attemptNumber,
+          result: 'in_progress',
+          progress: 0,
+          validated_target: target,
+          game_state: JSON.parse(JSON.stringify(gameConfig)) as Prisma.InputJsonValue,
         },
       });
-      if (existingUse) {
-        return { error: 'This lifeline retry was already recorded.', status: 409 };
-      }
 
       await tx.lifelineEvent.create({
         data: {
           team_id: session.teamId!,
           game_id: gameId,
           team_game_id: teamGame.id,
+          session_id: gameSession.id,
           action: 'used',
           amount: 1,
           by_admin: false,
@@ -82,7 +102,7 @@ export async function POST(req: NextRequest) {
         where: { id: teamGame.id },
         data: {
           status: 'SECOND_ATTEMPT_IN_PROGRESS',
-          attempt_count: 2,
+          attempt_count: attemptNumber,
           lifeline_used: true,
         },
       });
@@ -93,25 +113,12 @@ export async function POST(req: NextRequest) {
         create: { team_id: session.teamId!, lifeline_used: true },
       });
 
-      const gameSession = await tx.gameSession.create({
-        data: {
-          team_id: session.teamId!,
-          game_id: gameId,
-          team_game_id: teamGame.id,
-          attempt_number: 2,
-          result: 'in_progress',
-          progress: 0,
-          validated_target: 3,
-          game_state: { target: 3, gameKey: teamGame.game.game_key },
-        },
-      });
-
       await tx.auditLog.create({
         data: {
           actor: session.loginId || 'team',
           action: 'lifeline_used',
           team_id: session.teamId!,
-          after: JSON.stringify({ gameId, teamGameId: teamGame.id, attempt: 2 }),
+          after: JSON.stringify({ gameId, teamGameId: teamGame.id, attempt: attemptNumber }),
         },
       });
 
@@ -119,14 +126,22 @@ export async function POST(req: NextRequest) {
         sessionId: gameSession.id,
         startedAt: gameSession.started_at,
         minSeconds: teamGame.game.min_seconds,
+        gameConfig,
       };
     }, { isolationLevel: 'Serializable' });
 
     if ('error' in result) {
       return NextResponse.json({ error: result.error }, { status: result.status });
     }
+    const publicGameConfig = getPublicGameState(result.gameConfig);
+    if (!publicGameConfig) {
+      return NextResponse.json(
+        { error: 'The retry game state could not be initialized. Contact an administrator.' },
+        { status: 500 }
+      );
+    }
 
-    return NextResponse.json(result);
+    return NextResponse.json({ ...result, gameConfig: publicGameConfig });
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });

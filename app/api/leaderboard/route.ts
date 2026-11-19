@@ -15,6 +15,7 @@ export async function GET() {
       where: { active: true },
       include: {
         team_games: true,
+        team_score: true,
       },
     });
 
@@ -39,7 +40,7 @@ export async function GET() {
           completedGames,
           totalPoints,
           lifelineUsed,
-          completedAt: null,
+          completedAt: team.team_score?.completed_at || null,
           lifelinesRemaining: lifelines.remaining,
           isEliminated: false,
         };

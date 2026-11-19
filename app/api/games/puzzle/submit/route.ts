@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { isRecoveryAnswerCorrect } from '@/lib/games/rules';
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,7 +22,10 @@ export async function POST(req: NextRequest) {
 
       const puzzle = await tx.recoveryPuzzle.findUnique({
         where: { id: puzzleId },
-        include: { question: true, team_game: true },
+        include: {
+          question: { include: { options: true } },
+          team_game: true,
+        },
       });
       if (!puzzle || puzzle.team_id !== session.teamId) {
         return { error: 'Recovery puzzle not found or belongs to another team.', status: 404 };
@@ -32,13 +36,43 @@ export async function POST(req: NextRequest) {
       if (puzzle.team_game.status !== 'PENDING_RECOVERY_PUZZLE') {
         return { error: 'Recovery puzzle is not eligible.', status: 409 };
       }
+      if (!puzzle.question.options.some((option) => option.option_text === selectedAnswer)) {
+        return { error: 'Select one of the listed answer choices.', status: 400 };
+      }
 
-      const isCorrect = selectedAnswer === puzzle.question.correct_answer;
+      const isCorrect = isRecoveryAnswerCorrect(puzzle.question.correct_answer, selectedAnswer);
+      let clue: string | null = null;
+      let projectId: string | null = null;
+      if (isCorrect) {
+        const team = await tx.team.findUnique({
+          where: { id: session.teamId! },
+          select: { project_id: true },
+        });
+        projectId = team?.project_id || null;
+        if (!projectId) {
+          return { error: 'The team has no assigned project. Contact an administrator.', status: 409 };
+        }
+
+        const hint = await tx.projectHint.findUnique({
+          where: {
+            project_id_game_id: {
+              project_id: projectId,
+              game_id: puzzle.team_game.game_id,
+            },
+          },
+          select: { clue_text: true },
+        });
+        if (!hint?.clue_text.trim()) {
+          return { error: 'The recovery clue is unavailable. Contact an administrator.', status: 409 };
+        }
+        clue = hint.clue_text;
+      }
+
       await tx.recoveryPuzzleAttempt.create({
         data: {
           puzzle_id: puzzle.id,
           team_id: session.teamId!,
-          selected_answer: isCorrect ? selectedAnswer : selectedAnswer,
+          selected_answer: selectedAnswer,
           is_correct: isCorrect,
         },
       });
@@ -51,11 +85,17 @@ export async function POST(req: NextRequest) {
           puzzleStatus: 'PENDING',
         };
       }
+      if (!projectId || !clue) {
+        return { error: 'The recovery clue is unavailable. Contact an administrator.', status: 409 };
+      }
 
-      await tx.recoveryPuzzle.update({
-        where: { id: puzzle.id },
+      const puzzleClaim = await tx.recoveryPuzzle.updateMany({
+        where: { id: puzzle.id, team_id: session.teamId!, status: 'PENDING' },
         data: { status: 'COMPLETED', completed_at: new Date() },
       });
+      if (puzzleClaim.count !== 1) {
+        return { error: 'Recovery puzzle has already been completed.', status: 409 };
+      }
 
       await tx.teamGame.update({
         where: { id: puzzle.team_game_id },
@@ -66,42 +106,23 @@ export async function POST(req: NextRequest) {
         },
       });
 
-      const team = await tx.team.findUnique({
-        where: { id: session.teamId! },
-        select: { project_id: true },
-      });
-      let clue: string | null = null;
-
-      if (team?.project_id) {
-        const hint = await tx.projectHint.findUnique({
-          where: {
-            project_id_game_id: {
-              project_id: team.project_id,
-              game_id: puzzle.team_game.game_id,
-            },
+      await tx.projectClueUnlock.upsert({
+        where: {
+          team_id_project_id_game_id: {
+            team_id: session.teamId!,
+            project_id: projectId,
+            game_id: puzzle.team_game.game_id,
           },
-        });
-        if (hint) {
-          clue = hint.clue_text;
-          await tx.projectClueUnlock.upsert({
-            where: {
-              team_id_project_id_game_id: {
-                team_id: session.teamId!,
-                project_id: team.project_id,
-                game_id: puzzle.team_game.game_id,
-              },
-            },
-            update: {},
-            create: {
-              team_id: session.teamId!,
-              project_id: team.project_id,
-              game_id: puzzle.team_game.game_id,
-              team_game_id: puzzle.team_game_id,
-              reason: 'RECOVERY_PUZZLE',
-            },
-          });
-        }
-      }
+        },
+        update: {},
+        create: {
+          team_id: session.teamId!,
+          project_id: projectId,
+          game_id: puzzle.team_game.game_id,
+          team_game_id: puzzle.team_game_id,
+          reason: 'RECOVERY_PUZZLE',
+        },
+      });
 
       await tx.auditLog.create({
         data: {

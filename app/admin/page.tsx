@@ -26,6 +26,7 @@ import {
   PlusCircle,
   Lock,
   FolderKanban,
+  Gamepad2,
 } from 'lucide-react';
 
 export default function AdminDashboard() {
@@ -33,6 +34,7 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<'overview' | 'teams' | 'games' | 'projects' | 'puzzles' | 'audit' | 'leaderboard'>('overview');
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [preflight, setPreflight] = useState<any>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
@@ -48,6 +50,10 @@ export default function AdminDashboard() {
   const [teamEditError, setTeamEditError] = useState<string | null>(null);
   const [projects, setProjects] = useState<any[]>([]);
   const [enabledGames, setEnabledGames] = useState<any[]>([]);
+  const [gameLibrary, setGameLibrary] = useState<any[]>([]);
+  const [availableGameCatalog, setAvailableGameCatalog] = useState<any[]>([]);
+  const [gameLibraryLoading, setGameLibraryLoading] = useState(false);
+  const [gameLibraryError, setGameLibraryError] = useState<string | null>(null);
   const [projectHints, setProjectHints] = useState<{ gameId: string; clueText: string }[]>([]);
   const [selectedProject, setSelectedProject] = useState<any | null>(null);
   const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
@@ -91,6 +97,16 @@ export default function AdminDashboard() {
     }
   }, [router]);
 
+  const fetchPreflight = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/preflight');
+      const json = await res.json();
+      if (res.ok) setPreflight(json);
+    } catch (error) {
+      console.error('Pre-flight check failed:', error);
+    }
+  }, []);
+
   // Fetch leaderboard
   const fetchLeaderboard = useCallback(async () => {
     try {
@@ -133,6 +149,62 @@ export default function AdminDashboard() {
       console.error(e);
     }
   }, [router]);
+
+  const fetchGameLibrary = useCallback(async () => {
+    setGameLibraryLoading(true);
+    try {
+      const res = await fetch('/api/admin/games');
+      if (res.status === 401 || res.status === 403) {
+        router.push('/');
+        return;
+      }
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to load game library.');
+      setGameLibrary(json.games || []);
+      setAvailableGameCatalog(json.catalog || []);
+      setGameLibraryError(null);
+    } catch (error) {
+      setGameLibraryError(error instanceof Error ? error.message : 'Failed to load game library.');
+    } finally {
+      setGameLibraryLoading(false);
+    }
+  }, [router]);
+
+  const handleAddCatalogGame = async (gameKey: string) => {
+    setGameLibraryError(null);
+    try {
+      const res = await fetch('/api/admin/games', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gameKey }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to add game.');
+      await Promise.all([fetchGameLibrary(), fetchProjects(), fetchAuditLogs()]);
+    } catch (error) {
+      setGameLibraryError(error instanceof Error ? error.message : 'Failed to add game.');
+    }
+  };
+
+  const handleToggleGame = async (game: any) => {
+    setGameLibraryError(null);
+    try {
+      const res = await fetch('/api/admin/games/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'toggle_enabled',
+          gameId: game.id,
+          enabled: !game.enabled,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to update game.');
+      await Promise.all([fetchGameLibrary(), fetchProjects(), fetchAuditLogs()]);
+    } catch (error) {
+      setGameLibraryError(error instanceof Error ? error.message : 'Failed to update game.');
+    }
+  };
 
   const fetchPuzzles = useCallback(async () => {
     try {
@@ -246,20 +318,29 @@ export default function AdminDashboard() {
     fetchLeaderboard();
     fetchAuditLogs();
     fetchProjects();
+    fetchGameLibrary();
     fetchPuzzles();
+    fetchPreflight();
     // Live polling every 3s
     const timer = setInterval(() => {
       fetchData();
       fetchLeaderboard();
       fetchProjects();
+      fetchGameLibrary();
       fetchPuzzles();
+      fetchPreflight();
     }, 3000);
     return () => clearInterval(timer);
-  }, [fetchData, fetchLeaderboard, fetchAuditLogs, fetchProjects, fetchPuzzles]);
+  }, [fetchData, fetchLeaderboard, fetchAuditLogs, fetchProjects, fetchGameLibrary, fetchPuzzles, fetchPreflight]);
 
   // Event control handler
-  const handleEventAction = async (action: 'start' | 'pause' | 'resume' | 'end' | 'reset') => {
+  const handleEventAction = async (action: 'start' | 'pause' | 'resume' | 'end' | 'reset' | 'reset_data') => {
     if (action === 'reset' && !confirm('WARNING: Are you sure you want to RESET the event state to Ready?')) {
+      return;
+    }
+    if (action === 'reset_data' && !confirm(
+      'PERMANENTLY clear all assignments, game sessions, scores, lifeline events, recovery puzzle attempts, and clue unlocks? Teams, projects, games, clues, questions, and audit history will be preserved.'
+    )) {
       return;
     }
     try {
@@ -273,6 +354,8 @@ export default function AdminDashboard() {
         setActionMessage(`Event status updated: ${action.toUpperCase()}`);
         fetchData();
         fetchAuditLogs();
+        fetchLeaderboard();
+        fetchPuzzles();
       } else {
         alert(json.error || 'Failed to update event');
       }
@@ -424,6 +507,14 @@ export default function AdminDashboard() {
           </button>
 
           <button
+            onClick={() => handleEventAction('reset_data')}
+            className="px-2 py-1.5 bg-retro-card border border-retro-red/60 text-retro-red font-pixel text-[9px] rounded hover:bg-retro-red/20"
+            title="Clear competition data while preserving teams, projects, games, clues, questions, and audit history"
+          >
+            RESET DATA
+          </button>
+
+          <button
             onClick={handleLogout}
             className="p-1.5 text-retro-muted hover:text-retro-red rounded border border-retro-border"
             title="Logout"
@@ -476,6 +567,28 @@ export default function AdminDashboard() {
         )}
       </div>
 
+      {eventState.status === 'ready' && (
+        <section className={`border-b px-4 py-3 ${preflight?.canStart ? 'border-retro-green/40 bg-retro-green/5' : 'border-retro-amber/40 bg-retro-amber/5'}`}>
+          <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+            <strong className={`font-pixel ${preflight?.canStart ? 'text-retro-green' : 'text-retro-amber'}`}>
+              EVENT PRE-FLIGHT: {preflight?.canStart ? 'READY' : 'ACTION REQUIRED'}
+            </strong>
+            <span>{preflight?.teamsCount ?? '—'} active teams</span>
+            <span>{preflight?.enabledGamesCount ?? '—'} / 6–10 enabled games</span>
+            <span>{preflight?.recoveryQuestionsReady ? 'Recovery question ready' : 'Valid recovery question missing'}</span>
+            {(preflight?.missingProjects?.length > 0) && (
+              <span className="text-retro-red">{preflight.missingProjects.length} teams need projects</span>
+            )}
+            {(preflight?.missingHints?.length > 0) && (
+              <span className="text-retro-red">{preflight.missingHints.length} teams need game clues</span>
+            )}
+            {preflight && !preflight.canStart && preflight.missingProjects?.length === 0 && preflight.missingHints?.length === 0 && (
+              <span className="text-retro-red">Check game count and supported games.</span>
+            )}
+          </div>
+        </section>
+      )}
+
       {/* TABS NAVIGATION */}
       <nav className="bg-[#090b14] border-b border-retro-border px-4 flex space-x-1 overflow-x-auto text-xs">
         <button
@@ -487,6 +600,17 @@ export default function AdminDashboard() {
           }`}
         >
           <Users className="w-4 h-4" /> 25 TEAMS OVERVIEW
+        </button>
+
+        <button
+          onClick={() => setActiveTab('games')}
+          className={`py-3 px-4 font-pixel text-[11px] border-b-2 flex items-center gap-2 transition-all ${
+            activeTab === 'games'
+              ? 'border-retro-cyan text-retro-cyan bg-retro-cyan/10 font-bold'
+              : 'border-transparent text-retro-muted hover:text-white'
+          }`}
+        >
+          <Gamepad2 className="w-4 h-4" /> GAME LIBRARY
         </button>
 
         <button
@@ -673,6 +797,81 @@ export default function AdminDashboard() {
               </table>
             </div>
           </div>
+        )}
+
+        {activeTab === 'games' && (
+          <section className="space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-pixel text-sm text-retro-cyan">PLAYABLE GAME LIBRARY</h2>
+                <p className="mt-1 text-xs text-retro-muted">
+                  {gameLibrary.filter((game) => game.enabled).length} enabled · enable 6–10 games before event start
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={fetchGameLibrary}
+                className="rounded border border-retro-border px-3 py-2 font-pixel text-[10px] text-retro-muted hover:text-white"
+              >
+                REFRESH
+              </button>
+            </div>
+
+            {gameLibraryError && (
+              <div className="rounded border border-retro-red/60 bg-retro-red/10 p-3 text-xs text-retro-red" role="alert">
+                {gameLibraryError}
+              </div>
+            )}
+
+            {gameLibraryLoading && gameLibrary.length === 0 ? (
+              <p className="text-sm text-retro-muted">Loading game library…</p>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {gameLibrary.map((game) => (
+                  <article key={game.id} className="flex items-center justify-between gap-4 rounded-lg border border-retro-border bg-retro-card p-4">
+                    <div className="min-w-0">
+                      <h3 className="font-pixel text-xs text-white">{game.title}</h3>
+                      <p className="mt-1 font-mono text-[10px] text-retro-muted">
+                        {game.game_key} · minimum {game.min_seconds}s · project clue per assignment
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleGame(game)}
+                      disabled={data?.eventState?.status !== 'ready' || Boolean(data?.eventState?.started_at)}
+                      className={`shrink-0 rounded border px-3 py-2 font-pixel text-[9px] disabled:opacity-40 ${
+                        game.enabled
+                          ? 'border-retro-green/60 text-retro-green'
+                          : 'border-retro-border text-retro-muted'
+                      }`}
+                    >
+                      {game.enabled ? 'ENABLED' : 'DISABLED'}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+
+            {availableGameCatalog.length > 0 && (
+              <div className="rounded-lg border border-retro-border bg-retro-card p-4">
+                <h3 className="mb-3 font-pixel text-xs text-retro-magenta">ADD SUPPORTED GAMES</h3>
+                <div className="flex flex-wrap gap-2">
+                  {availableGameCatalog.map((entry) => (
+                    <button
+                      key={entry.gameKey}
+                      type="button"
+                      onClick={() => void handleAddCatalogGame(entry.gameKey)}
+                      disabled={data?.eventState?.status !== 'ready' || Boolean(data?.eventState?.started_at)}
+                      className="rounded border border-retro-magenta/60 px-3 py-2 text-left text-xs text-retro-magenta hover:bg-retro-magenta/10 disabled:opacity-40"
+                    >
+                      <span className="block font-pixel text-[9px]">{entry.title}</span>
+                      <span className="mt-1 block text-[10px] text-retro-muted">{entry.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
         )}
 
         {activeTab === 'projects' && (

@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { GAME_RULES } from '@/lib/config/gameRules';
+import {
+  getFailedAttemptDisposition,
+  getGameCompletionPoints,
+  isValidRecoveryQuestion,
+} from '@/lib/games/rules';
 
 async function remainingLifelines(tx: any, teamId: string) {
   const events = await tx.lifelineEvent.findMany({
@@ -56,16 +61,20 @@ async function createRecoveryPuzzle(tx: any, teamId: string, teamGame: any) {
   });
   const previousIds = new Set(previous.map((item: any) => item.question_id));
 
-  let question = await tx.componentQuestion.findFirst({
-    where: { enabled: true, id: { notIn: Array.from(previousIds) } },
+  const questions = await tx.componentQuestion.findMany({
+    where: { enabled: true },
     include: { options: { orderBy: { sort_order: 'asc' } } },
+    orderBy: { created_at: 'asc' },
   });
-  if (!question) {
-    question = await tx.componentQuestion.findFirst({
-      where: { enabled: true },
-      include: { options: { orderBy: { sort_order: 'asc' } } },
-    });
-  }
+  const validQuestions = questions.filter((question: any) =>
+    isValidRecoveryQuestion({
+      questionText: question.question_text,
+      imageUrl: question.image_url,
+      correctAnswer: question.correct_answer,
+      options: question.options.map((option: any) => ({ optionText: option.option_text })),
+    })
+  );
+  const question = validQuestions.find((item: any) => !previousIds.has(item.id)) || validQuestions[0];
   if (!question) return null;
 
   const puzzle = await tx.recoveryPuzzle.upsert({
@@ -156,6 +165,44 @@ export async function POST(req: NextRequest) {
         return { error: 'Game is not assigned to this team.', status: 403 };
       }
 
+      if (result === 'lost') {
+        const gameState =
+          gameSession.game_state && typeof gameSession.game_state === 'object'
+            ? gameSession.game_state as Record<string, unknown>
+            : {};
+        const serverVerifiedFailure = gameState.attemptFailed === true
+          || gameState.failed === true
+          || (
+            gameSession.game.game_key === 'target-sequence'
+            && typeof gameState.failures === 'number'
+            && gameState.failures >= 3
+          );
+        if (!serverVerifiedFailure) {
+          return {
+            error: 'The server has not verified a failed attempt. Continue playing or explicitly forfeit.',
+            status: 400,
+          };
+        }
+      }
+
+      const projectHint = result === 'won' && team.project_id
+        ? await tx.projectHint.findUnique({
+            where: {
+              project_id_game_id: {
+                project_id: team.project_id,
+                game_id: gameSession.game_id,
+              },
+            },
+            select: { clue_text: true },
+          })
+        : null;
+      if (result === 'won' && !projectHint?.clue_text.trim()) {
+        return {
+          error: 'The assigned project clue is unavailable. Contact an administrator.',
+          status: 409,
+        };
+      }
+
       const now = new Date();
       const pausedSeconds = gameSession.paused_seconds
         + (gameSession.pause_started_at
@@ -199,7 +246,7 @@ export async function POST(req: NextRequest) {
 
       if (result === 'won') {
         const normalCompletion = gameSession.attempt_number === 1;
-        const points = normalCompletion ? 10 : 5;
+        const points = getGameCompletionPoints(gameSession.attempt_number);
         const status = normalCompletion ? 'COMPLETED_NORMAL' : 'COMPLETED_WITH_LIFELINE';
 
         await tx.teamGame.update({
@@ -212,36 +259,24 @@ export async function POST(req: NextRequest) {
           },
         });
 
-        let projectHint: string | null = null;
-        if (team.project_id) {
-          const hint = await tx.projectHint.findUnique({
+        if (team.project_id && projectHint) {
+          await tx.projectClueUnlock.upsert({
             where: {
-              project_id_game_id: {
+              team_id_project_id_game_id: {
+                team_id: session.teamId!,
                 project_id: team.project_id,
                 game_id: gameSession.game_id,
               },
             },
+            update: {},
+            create: {
+              team_id: session.teamId!,
+              project_id: team.project_id,
+              game_id: gameSession.game_id,
+              team_game_id: teamGame.id,
+              reason: status,
+            },
           });
-          if (hint) {
-            projectHint = hint.clue_text;
-            await tx.projectClueUnlock.upsert({
-              where: {
-                team_id_project_id_game_id: {
-                  team_id: session.teamId!,
-                  project_id: team.project_id,
-                  game_id: gameSession.game_id,
-                },
-              },
-              update: {},
-              create: {
-                team_id: session.teamId!,
-                project_id: team.project_id,
-                game_id: gameSession.game_id,
-                team_game_id: teamGame.id,
-                reason: status,
-              },
-            });
-          }
         }
 
         await refreshTeamScore(tx, session.teamId!);
@@ -263,36 +298,35 @@ export async function POST(req: NextRequest) {
 
         return {
           success: true,
-          clue: gameSession.game.clue_text,
-          projectHint,
+          clue: projectHint?.clue_text || null,
           points,
           status,
           durationSeconds,
         };
       }
 
-      if (gameSession.attempt_number === 1) {
-        const remaining = await remainingLifelines(tx, session.teamId!);
-        if (remaining >= 1) {
-          await tx.teamGame.update({
-            where: { id: teamGame.id },
-            data: { status: 'FIRST_ATTEMPT_FAILED', attempt_count: 1 },
-          });
-          await tx.auditLog.create({
-            data: {
-              actor: session.loginId || 'team',
-              action: 'first_attempt_failed',
-              team_id: session.teamId!,
-              after: JSON.stringify({ gameId: gameSession.game_id }),
-            },
-          });
-          return {
-            success: false,
-            firstAttemptFailed: true,
-            lifelineAvailable: true,
-            durationSeconds,
-          };
-        }
+      const remaining = gameSession.attempt_number === 1
+        ? await remainingLifelines(tx, session.teamId!)
+        : 0;
+      if (getFailedAttemptDisposition(gameSession.attempt_number, remaining) === 'LIFELINE_RETRY_AVAILABLE') {
+        await tx.teamGame.update({
+          where: { id: teamGame.id },
+          data: { status: 'FIRST_ATTEMPT_FAILED', attempt_count: 1 },
+        });
+        await tx.auditLog.create({
+          data: {
+            actor: session.loginId || 'team',
+            action: 'first_attempt_failed',
+            team_id: session.teamId!,
+            after: JSON.stringify({ gameId: gameSession.game_id }),
+          },
+        });
+        return {
+          success: false,
+          firstAttemptFailed: true,
+          lifelineAvailable: true,
+          durationSeconds,
+        };
       }
 
       await tx.teamGame.update({

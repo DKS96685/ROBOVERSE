@@ -5,7 +5,17 @@ import confetti from 'canvas-confetti';
 import SnakeGame from './SnakeGame';
 import PongGame from './PongGame';
 import MemoryMatchGame from './MemoryMatchGame';
+import LightsOutGame from './LightsOutGame';
+import QuickMazeGame from './QuickMazeGame';
+import TargetSequenceGame from './TargetSequenceGame';
 import { soundManager } from '@/lib/sound';
+import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
+import {
+  GameProgressResponse,
+  ServerGameAction,
+  ServerGameState,
+  parseServerGameState,
+} from '@/lib/games/state';
 import { X, Play, Heart, AlertTriangle } from 'lucide-react';
 
 interface GameModalProps {
@@ -40,46 +50,65 @@ export default function GameModal({
   const [isPlaying, setIsPlaying] = useState(false);
   const [countdownValue, setCountdownValue] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [serverGameState, setServerGameState] = useState<ServerGameState | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [canRetryResult, setCanRetryResult] = useState(false);
   const [retryResult, setRetryResult] = useState<'won' | 'lost' | null>(null);
-  const [lifelineRetryAvailable, setLifelineRetryAvailable] = useState(false);
+  const [lifelineRetryAvailable, setLifelineRetryAvailable] = useState(
+    game.status === 'FIRST_ATTEMPT_FAILED' && lifelinesRemaining > 0
+  );
   const [recoveryPuzzle, setRecoveryPuzzle] = useState<any | null>(game.puzzle || null);
   const eventPausedRef = useRef(eventPaused);
   const countdownRef = useRef<number | null>(null);
   const resultSubmittedRef = useRef(false);
 
   // Result state
-  const [resultState, setResultState] = useState<'idle' | 'won' | 'lost'>('idle');
+  const [resultState, setResultState] = useState<'idle' | 'won' | 'recovered'>('idle');
   const [revealedClue, setRevealedClue] = useState<string | null>(game.clue);
-  const [revealedProjectHint, setRevealedProjectHint] = useState<string | null>(null);
   const [decodedText, setDecodedText] = useState<string>('');
+  const [pointsAwarded, setPointsAwarded] = useState<number | null>(null);
 
   useEffect(() => {
     eventPausedRef.current = eventPaused;
   }, [eventPaused]);
 
-  const reportProgress = useCallback(async (
-    action: 'snakeFoodCollected' | 'pongPlayerPoint' | 'memoryPairMatched'
-  ): Promise<boolean> => {
-    if (!sessionId) return false;
-    try {
-      const res = await fetch('/api/games/progress', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, action: { type: action } }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Failed to verify game progress.');
-        return false;
+  const submitGameAction = useCallback(async (
+    action: ServerGameAction
+  ): Promise<GameProgressResponse | null> => {
+    if (!sessionId) return null;
+    const body = JSON.stringify({
+      sessionId,
+      requestId: window.crypto.randomUUID(),
+      action,
+    });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch('/api/games/progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        });
+        const data = await res.json();
+        if (
+          res.status === 409
+          && attempt === 0
+          && data.error === 'Progress update conflicted. Retry.'
+        ) continue;
+        if (!res.ok) {
+          setErrorMsg(data.error || 'Failed to verify game progress.');
+          return null;
+        }
+        return data as GameProgressResponse;
+      } catch (error) {
+        if (attempt === 1) {
+          setErrorMsg(error instanceof Error ? error.message : 'Failed to verify game progress.');
+          return null;
+        }
       }
-      return Boolean(data.winningReady);
-    } catch (error: any) {
-      setErrorMsg(error.message || 'Failed to verify game progress.');
-      return false;
     }
+    return null;
   }, [sessionId]);
 
   useEffect(() => () => {
@@ -100,7 +129,12 @@ export default function GameModal({
         throw new Error(data.error || 'Failed to start game session');
       }
 
+      const parsedState = parseServerGameState(data.gameConfig);
+      if (!parsedState || parsedState.gameKey !== game.gameKey) {
+        throw new Error('The server did not return a valid game state. Please contact an administrator.');
+      }
       setSessionId(data.sessionId);
+      setServerGameState(parsedState);
       resultSubmittedRef.current = false;
       setCountdownValue(null);
       setIsPlaying(true);
@@ -111,7 +145,7 @@ export default function GameModal({
     } finally {
       setLoading(false);
     }
-  }, [game.id]);
+  }, [game.gameKey, game.id]);
 
   const handleStartGame = () => {
     if (eventPaused || loading || countdownRef.current !== null) return;
@@ -173,14 +207,14 @@ export default function GameModal({
       const res = await fetch('/api/games/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, result: 'won', progress: 3, submissionKey: sessionId }),
+        body: JSON.stringify({ sessionId, result: 'won', submissionKey: sessionId }),
       });
       const data = await res.json();
       if (res.ok && data.success) {
         setResultState('won');
         setIsPlaying(false);
         setRevealedClue(data.clue);
-        setRevealedProjectHint(data.projectHint || null);
+        setPointsAwarded(data.points);
         setCanRetryResult(false);
         setRetryResult(null);
 
@@ -219,6 +253,15 @@ export default function GameModal({
     }
     resultSubmittedRef.current = true;
     try {
+      const verifiedFailure = await submitGameAction({ type: 'forfeitAttempt' });
+      if (!verifiedFailure?.failed) {
+        resultSubmittedRef.current = false;
+        setErrorMsg('The server could not verify the failed attempt. Please retry after checking the connection.');
+        setCanRetryResult(true);
+        setRetryResult('lost');
+        return;
+      }
+
       const res = await fetch('/api/games/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -242,14 +285,10 @@ export default function GameModal({
           onRefreshDashboard();
           return;
         }
-        setResultState('lost');
-        setIsPlaying(false);
-        setRevealedClue(data.clue);
-        setRevealedProjectHint(null);
-        setRetryResult(null);
-        setCanRetryResult(false);
-        animateClueDecoding(data.clue);
-        onRefreshDashboard();
+        setErrorMsg('The server returned an unexpected game result. Please refresh the dashboard.');
+        setCanRetryResult(true);
+        setRetryResult('lost');
+        resultSubmittedRef.current = false;
       } else {
         setErrorMsg(data.error || 'Failed to submit game result.');
         setCanRetryResult(true);
@@ -262,7 +301,7 @@ export default function GameModal({
       setRetryResult('lost');
       resultSubmittedRef.current = false;
     }
-  }, [animateClueDecoding, onRefreshDashboard, sessionId]);
+  }, [onRefreshDashboard, sessionId, submitGameAction]);
 
   const handleLifelineRetry = async () => {
     setLoading(true);
@@ -276,7 +315,14 @@ export default function GameModal({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to start lifeline retry');
       setSessionId(data.sessionId);
+      const parsedState = parseServerGameState(data.gameConfig);
+      if (!parsedState || parsedState.gameKey !== game.gameKey) {
+        throw new Error('The server did not return a valid retry state. Please contact an administrator.');
+      }
+      setServerGameState(parsedState);
       resultSubmittedRef.current = false;
+      setRetryResult(null);
+      setCanRetryResult(false);
       setLifelineRetryAvailable(false);
       setIsPlaying(true);
       onRefreshDashboard();
@@ -301,8 +347,9 @@ export default function GameModal({
       if (!res.ok) throw new Error(data.error || 'Failed to submit puzzle answer');
       if (data.correct) {
         setRecoveryPuzzle(null);
-        setResultState('lost');
+        setResultState('recovered');
         setRevealedClue(data.clue);
+        setPointsAwarded(0);
         if (data.clue) animateClueDecoding(data.clue);
         onRefreshDashboard();
       } else {
@@ -310,41 +357,6 @@ export default function GameModal({
       }
     } catch (error: any) {
       setErrorMsg(error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Use Lifeline to Skip
-  const handleSkipWithLifeline = async () => {
-    if (lifelinesRemaining < 1 || eventPaused || loading || resultSubmittedRef.current) return;
-    if (!confirm('Are you sure you want to spend 1 Lifeline to skip this game and instantly reveal its clue?')) {
-      return;
-    }
-
-    resultSubmittedRef.current = true;
-    setLoading(true);
-    try {
-      const res = await fetch('/api/games/lifeline-skip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gameId: game.id }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        soundManager.playDamage();
-        setResultState('lost');
-        setRevealedClue(data.clue);
-        setRevealedProjectHint(null);
-        animateClueDecoding(data.clue);
-        onRefreshDashboard();
-      } else {
-        setErrorMsg(data.error || 'Failed to use lifeline');
-        resultSubmittedRef.current = false;
-      }
-    } catch (e: any) {
-      setErrorMsg(e.message);
-      resultSubmittedRef.current = false;
     } finally {
       setLoading(false);
     }
@@ -389,28 +401,67 @@ export default function GameModal({
           {isPlaying && (
             <div className="w-full flex flex-col items-center">
               {game.gameKey === 'snake' && (
+                serverGameState?.gameKey === 'snake' && (
                 <SnakeGame
+                  initialState={serverGameState}
                   minSeconds={game.minSeconds}
                   isPaused={eventPaused}
-                  onProgress={reportProgress}
+                  onAction={submitGameAction}
                   onWin={handleWin}
                   onLose={handleLose}
                 />
+                )
               )}
               {game.gameKey === 'pong' && (
+                serverGameState?.gameKey === 'pong' && (
                 <PongGame
+                  initialState={serverGameState}
                   minSeconds={game.minSeconds}
                   isPaused={eventPaused}
-                  onProgress={reportProgress}
+                  onAction={submitGameAction}
+                  onWin={handleWin}
+                  onLose={handleLose}
+                />
+                )
+              )}
+              {game.gameKey === 'memory' && (
+                serverGameState?.gameKey === 'memory' && (
+                <MemoryMatchGame
+                  initialState={serverGameState}
+                  minSeconds={game.minSeconds}
+                  isPaused={eventPaused}
+                  onAction={submitGameAction}
+                  onWin={handleWin}
+                  onLose={handleLose}
+                />
+                )
+              )}
+              {game.gameKey === 'lights-out' && serverGameState?.gameKey === 'lights-out' && (
+                <LightsOutGame
+                  initialState={serverGameState}
+                  minSeconds={game.minSeconds}
+                  isPaused={eventPaused}
+                  onAction={submitGameAction}
                   onWin={handleWin}
                   onLose={handleLose}
                 />
               )}
-              {game.gameKey === 'memory' && (
-                <MemoryMatchGame
+              {game.gameKey === 'quick-maze' && serverGameState?.gameKey === 'quick-maze' && (
+                <QuickMazeGame
+                  initialState={serverGameState}
                   minSeconds={game.minSeconds}
                   isPaused={eventPaused}
-                  onProgress={reportProgress}
+                  onAction={submitGameAction}
+                  onWin={handleWin}
+                  onLose={handleLose}
+                />
+              )}
+              {game.gameKey === 'target-sequence' && serverGameState?.gameKey === 'target-sequence' && (
+                <TargetSequenceGame
+                  initialState={serverGameState}
+                  minSeconds={game.minSeconds}
+                  isPaused={eventPaused}
+                  onAction={submitGameAction}
                   onWin={handleWin}
                   onLose={handleLose}
                 />
@@ -426,14 +477,16 @@ export default function GameModal({
                   <h3 className="font-pixel text-retro-green text-xl mb-1 animate-pulse">
                     ★ LEVEL CLEARED ★
                   </h3>
-                  <p className="text-xs text-retro-cyan font-pixel">DATA TRANSMISSION VERIFIED</p>
+                  <p className="text-xs text-retro-cyan font-pixel">
+                    VERIFIED COMPLETION · {pointsAwarded ?? 0} POINTS
+                  </p>
                 </div>
               ) : (
                 <div className="mb-4">
                   <h3 className="font-pixel text-retro-amber text-lg mb-1">
-                    [TASK BYPASSED VIA LIFELINE]
+                    [GAME SKIPPED AFTER RECOVERY]
                   </h3>
-                  <p className="text-xs text-retro-muted font-pixel">1 LIFELINE EXPENDED</p>
+                  <p className="text-xs text-retro-muted font-pixel">0 POINTS · CONTINUE TO YOUR NEXT GAME</p>
                 </div>
               )}
 
@@ -449,17 +502,6 @@ export default function GameModal({
                   {decodedText || revealedClue}
                 </p>
               </div>
-              {resultState === 'won' && revealedProjectHint && (
-                <div className="w-full p-4 bg-retro-bg border border-retro-magenta/70 rounded text-left my-2">
-                  <span className="text-[10px] font-pixel text-retro-magenta block mb-2">
-                    PROJECT HINT UNLOCKED
-                  </span>
-                  <p className="font-retro text-base sm:text-lg text-white leading-relaxed">
-                    {revealedProjectHint}
-                  </p>
-                </div>
-              )}
-
               <button
                 onClick={onClose}
                 className="mt-4 px-6 py-2.5 bg-retro-cyan text-retro-bg font-pixel text-xs rounded hover:bg-white transition-all shadow-neon-cyan font-bold"
@@ -507,16 +549,12 @@ export default function GameModal({
 
               <h3 className="font-pixel text-lg text-white mb-2">{game.title}</h3>
               <p className="text-sm text-retro-muted font-pixel mb-6 max-w-md">
-                Reach 3 progress units. The game begins only after the 3, 2, 1, GO! countdown.
+                {getGameCatalogEntry(game.gameKey)?.description || 'Complete this assigned challenge to unlock its project clue.'}
               </p>
 
               <div className="bg-[#0b0d18] border border-retro-border p-3 rounded mb-6 text-left w-full max-w-sm space-y-2 text-sm font-mono">
                 <p className="text-retro-cyan font-bold">
-                  {game.gameKey === 'snake'
-                    ? 'CONTROLS: Arrow keys / WASD or the touch D-pad.'
-                    : game.gameKey === 'pong'
-                    ? 'CONTROLS: W/S, arrow keys, or drag your paddle.'
-                    : 'CONTROLS: Watch the preview, then tap two cards to match them.'}
+                  CONTROLS: {getGameCatalogEntry(game.gameKey)?.controls || 'Use the on-screen game controls.'}
                 </p>
                 <div className="flex justify-between">
                   <span className="text-retro-muted">Minimum Time:</span>
@@ -528,29 +566,39 @@ export default function GameModal({
                 </div>
                 <div className="flex justify-between">
                   <span className="text-retro-muted">Rule:</span>
-                  <span className="text-retro-yellow">Loss cuts 1 Lifeline & skips game</span>
+                  <span className="text-retro-yellow">
+                    {game.status === 'IN_PROGRESS'
+                      ? 'Resume your current attempt'
+                      : 'Failure does not automatically spend your lifeline'}
+                  </span>
                 </div>
               </div>
 
               <div className="flex flex-col sm:flex-row gap-3 w-full max-w-sm">
                 <button
                   onClick={handleStartGame}
-                  disabled={loading || eventPaused}
+                  disabled={loading || eventPaused || lifelineRetryAvailable}
                   className="flex-1 py-3 px-4 bg-retro-cyan text-retro-bg font-pixel text-xs rounded font-bold hover:bg-white active:scale-95 transition-all shadow-neon-cyan flex items-center justify-center gap-2"
                 >
                   <Play className="w-4 h-4 fill-current" />
-                  {eventPaused ? 'EVENT PAUSED' : 'START GAME'}
+                  {eventPaused
+                    ? 'EVENT PAUSED'
+                    : game.status === 'IN_PROGRESS' || game.status === 'SECOND_ATTEMPT_IN_PROGRESS'
+                    ? 'RESUME GAME'
+                    : 'START GAME'}
                 </button>
 
-                <button
-                  onClick={handleLifelineRetry}
-                  disabled={loading || eventPaused || !lifelineRetryAvailable || lifelinesRemaining < 1}
-                  className="py-3 px-4 bg-retro-card border border-retro-magenta text-retro-magenta hover:bg-retro-magenta/20 active:scale-95 font-pixel text-xs rounded transition-all flex items-center justify-center gap-2 disabled:opacity-40"
-                  title="Use the one lifeline for a second attempt"
-                >
-                  <Heart className="w-4 h-4 fill-current text-retro-magenta" />
-                  USE LIFELINE FOR RETRY
-                </button>
+                {lifelineRetryAvailable && (
+                  <button
+                    onClick={handleLifelineRetry}
+                    disabled={loading || eventPaused || lifelinesRemaining < 1}
+                    className="py-3 px-4 bg-retro-card border border-retro-magenta text-retro-magenta hover:bg-retro-magenta/20 active:scale-95 font-pixel text-xs rounded transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                    title="Use the one lifeline for a second attempt"
+                  >
+                    <Heart className="w-4 h-4 fill-current text-retro-magenta" />
+                    USE LIFELINE FOR RETRY
+                  </button>
+                )}
 
               </div>
             </div>

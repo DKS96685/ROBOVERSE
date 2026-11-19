@@ -3,15 +3,8 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { logAuditEvent } from '@/lib/audit';
 import crypto from 'crypto';
-
-function shuffle<T>(items: T[]): T[] {
-  const result = [...items];
-  for (let i = result.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(i + 1);
-    [result[i], result[j]] = [result[j], result[i]];
-  }
-  return result;
-}
+import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
+import { isValidRecoveryQuestion, selectGamesForTeam } from '@/lib/games/rules';
 
 export async function POST(req: NextRequest) {
   try {
@@ -31,6 +24,18 @@ export async function POST(req: NextRequest) {
       }
 
       const updated = await prisma.$transaction(async (tx) => {
+        const existingAssignment = await tx.teamGame.findFirst({
+          where: {
+            OR: [
+              { required: true },
+              { assignment_run_id: { not: null } },
+            ],
+          },
+          select: { id: true },
+        });
+        const existingSession = await tx.gameSession.findFirst({ select: { id: true } });
+        if (existingAssignment || existingSession) throw new Error('EVENT_DATA_EXISTS');
+
         const activeTeams = await tx.team.findMany({
           where: { active: true },
           select: { id: true, name: true, project_id: true },
@@ -41,7 +46,31 @@ export async function POST(req: NextRequest) {
           where: { enabled: true },
           orderBy: { order_num: 'asc' },
         });
-        if (enabledGames.length < 3) throw new Error('NOT_ENOUGH_GAMES');
+        if (enabledGames.length < 6 || enabledGames.length > 10) {
+          throw new Error('INVALID_ENABLED_GAME_COUNT');
+        }
+        if (enabledGames.some((game) => !getGameCatalogEntry(game.game_key))) {
+          throw new Error('UNSUPPORTED_ENABLED_GAME');
+        }
+
+        const recoveryQuestions = await tx.componentQuestion.findMany({
+          where: { enabled: true },
+          select: {
+            question_text: true,
+            image_url: true,
+            correct_answer: true,
+            options: { select: { option_text: true } },
+          },
+        });
+        const hasRecoveryQuestion = recoveryQuestions.some((question) =>
+          isValidRecoveryQuestion({
+            questionText: question.question_text,
+            imageUrl: question.image_url,
+            correctAnswer: question.correct_answer,
+            options: question.options.map((option) => ({ optionText: option.option_text })),
+          })
+        );
+        if (!hasRecoveryQuestion) throw new Error('RECOVERY_QUESTION_REQUIRED');
 
         for (const team of activeTeams) {
           if (!team.project_id) throw new Error(`TEAM_PROJECT_REQUIRED:${team.name}`);
@@ -63,21 +92,20 @@ export async function POST(req: NextRequest) {
         const seenCombinations = new Set<string>();
 
         for (const team of activeTeams) {
-          await tx.teamGame.deleteMany({ where: { team_id: team.id } });
+          await tx.teamGame.deleteMany({
+            where: {
+              team_id: team.id,
+              required: false,
+              assignment_run_id: null,
+            },
+          });
 
-          const ranked = shuffle(enabledGames).sort(
-            (a, b) => (assignmentCounts.get(a.id) || 0) - (assignmentCounts.get(b.id) || 0)
+          const selected = selectGamesForTeam(
+            enabledGames,
+            assignmentCounts,
+            seenCombinations,
+            (max) => crypto.randomInt(max)
           );
-          let selected = ranked.slice(0, 3);
-          let selectedIds = selected.map((game) => game.id).sort().join(':');
-
-          for (let attempt = 0; seenCombinations.has(selectedIds) && attempt < 20; attempt++) {
-            const alternatives = shuffle(enabledGames);
-            selected = alternatives.slice(0, 3);
-            selectedIds = selected.map((game) => game.id).sort().join(':');
-          }
-          seenCombinations.add(selectedIds);
-          selected = shuffle(selected);
 
           for (let index = 0; index < selected.length; index++) {
             const game = selected[index];
@@ -92,7 +120,6 @@ export async function POST(req: NextRequest) {
                 updated_by: 'system_allocation',
               },
             });
-            assignmentCounts.set(game.id, (assignmentCounts.get(game.id) || 0) + 1);
           }
 
           await tx.teamScore.upsert({
@@ -223,6 +250,10 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'reset') {
+      if (event?.status === 'running' || event?.status === 'paused') {
+        return NextResponse.json({ error: 'End the event before resetting its state.' }, { status: 409 });
+      }
+
       const updated = await prisma.eventState.update({
         where: { id: 'global' },
         data: {
@@ -245,47 +276,38 @@ export async function POST(req: NextRequest) {
 
     // Full event data reset — keeps teams and games
     if (action === 'reset_data') {
-      // Delete transactional data in a transaction
-      await prisma.$transaction([
-        prisma.gameSession.deleteMany(),
-        prisma.lifelineEvent.deleteMany(),
-        prisma.auditLog.deleteMany(),
-      ]);
-
-      const allGames = await prisma.game.findMany({ orderBy: { order_num: 'asc' } });
-      const allTeams = await prisma.team.findMany({ select: { id: true } });
-      const now = new Date();
-
-      for (const team of allTeams) {
-        for (let i = 0; i < allGames.length; i++) {
-          await prisma.teamGame.upsert({
-            where: { team_id_game_id: { team_id: team.id, game_id: allGames[i].id } },
-            update: { status: i === 0 ? 'available' : 'locked', updated_by: 'admin_reset' },
-            create: {
-              team_id: team.id,
-              game_id: allGames[i].id,
-              status: i === 0 ? 'available' : 'locked',
-              updated_by: 'admin_reset',
-            },
-          });
-        }
+      if (event?.status === 'running' || event?.status === 'paused') {
+        return NextResponse.json({ error: 'Pause or end the event before resetting competition data.' }, { status: 409 });
       }
 
-      const resetEvent = await prisma.eventState.upsert({
-        where: { id: 'global' },
-        update: { status: 'ready', started_at: null, paused_at: null, total_paused_seconds: 0 },
-        create: { id: 'global', status: 'ready', started_at: null, paused_at: null, total_paused_seconds: 0 },
-      });
+      const resetEvent = await prisma.$transaction(async (tx) => {
+        await tx.recoveryPuzzleAttempt.deleteMany();
+        await tx.projectClueUnlock.deleteMany();
+        await tx.recoveryPuzzle.deleteMany();
+        await tx.gameSession.deleteMany();
+        await tx.lifelineEvent.deleteMany();
+        await tx.teamScore.deleteMany();
+        await tx.teamGame.deleteMany();
 
-      await prisma.auditLog.create({
-        data: {
-          actor: session.email || 'admin',
-          action: 'event_data_reset',
-          before: beforeState ? JSON.stringify(beforeState) : null,
-          after: JSON.stringify({ status: 'ready', message: 'Full event data reset' }),
-        },
+        const updatedEvent = await tx.eventState.upsert({
+          where: { id: 'global' },
+          update: { status: 'ready', started_at: null, paused_at: null, total_paused_seconds: 0 },
+          create: { id: 'global', status: 'ready', started_at: null, paused_at: null, total_paused_seconds: 0 },
+        });
+        await tx.auditLog.create({
+          data: {
+            actor: session.email || 'admin',
+            action: 'event_data_reset',
+            before: JSON.stringify(beforeState),
+            after: JSON.stringify({
+              status: 'ready',
+              preserved: ['teams', 'projects', 'games', 'project hints', 'component questions', 'audit history'],
+              cleared: ['assignments', 'game sessions', 'lifeline events', 'scores', 'recovery puzzles', 'clue unlocks'],
+            }),
+          },
+        });
+        return updatedEvent;
       });
-
       return NextResponse.json({ success: true, eventState: resetEvent });
     }
 
@@ -298,7 +320,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'At least one active team is required.' }, { status: 400 });
     }
     if (error.message === 'NOT_ENOUGH_GAMES') {
-      return NextResponse.json({ error: 'At least three enabled games are required.' }, { status: 400 });
+      return NextResponse.json({ error: 'At least six enabled games are required.' }, { status: 400 });
+    }
+    if (error.message === 'INVALID_ENABLED_GAME_COUNT') {
+      return NextResponse.json({ error: 'Enable between six and ten games before starting the event.' }, { status: 400 });
+    }
+    if (error.message === 'UNSUPPORTED_ENABLED_GAME') {
+      return NextResponse.json({ error: 'An enabled game has no playable implementation.' }, { status: 400 });
+    }
+    if (error.message === 'RECOVERY_QUESTION_REQUIRED') {
+      return NextResponse.json({ error: 'Enable at least one valid recovery question with an image and answer choices.' }, { status: 400 });
+    }
+    if (error.message === 'EVENT_DATA_EXISTS') {
+      return NextResponse.json(
+        { error: 'Existing assignments or game sessions were preserved. Use RESET EVENT DATA before starting a new competition run.' },
+        { status: 409 }
+      );
     }
     if (typeof error.message === 'string' && error.message.startsWith('TEAM_PROJECT_REQUIRED:')) {
       const teamName = error.message.split(':').slice(1).join(':');

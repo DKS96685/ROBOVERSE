@@ -34,6 +34,16 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const action = body.action;
 
+    if (action === 'create' || action === 'update' || action === 'delete') {
+      const event = await prisma.eventState.findUnique({ where: { id: 'global' } });
+      if (event && (event.status !== 'ready' || event.started_at)) {
+        return NextResponse.json(
+          { error: 'Recovery questions cannot be changed after the event starts.' },
+          { status: 409 }
+        );
+      }
+    }
+
     if (action === 'create' || action === 'update') {
       const questionId = typeof body.questionId === 'string' ? body.questionId : null;
       const questionText = typeof body.questionText === 'string' ? body.questionText.trim() : '';

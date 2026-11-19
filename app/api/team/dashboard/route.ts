@@ -41,42 +41,82 @@ export async function GET() {
 
     // 4. Games & clues status
     const teamGames = await prisma.teamGame.findMany({
-      where: { team_id: teamId },
+      where: { team_id: teamId, required: true },
       include: { game: true },
+      orderBy: { assigned_order: 'asc' },
     });
 
-    const gamesData = teamGames
-      .filter((teamGame) => teamGame.game.enabled)
-      .map((teamGame) => {
-        const game = teamGame.game;
-        const isLegacyRevealed =
-          teamGame.status === 'completed' || teamGame.status === 'skipped';
-        const isP0Revealed =
-          teamGame.status === 'COMPLETED_NORMAL'
-          || teamGame.status === 'COMPLETED_WITH_LIFELINE'
-          || teamGame.status === 'SKIPPED_AFTER_RECOVERY';
+    const teamGameIds = teamGames.map((teamGame) => teamGame.id);
+    const unlocks = team.project_id && teamGameIds.length > 0
+      ? await prisma.projectClueUnlock.findMany({
+          where: {
+            team_id: teamId,
+            project_id: team.project_id,
+            team_game_id: { in: teamGameIds },
+          },
+          select: { game_id: true },
+        })
+      : [];
+    const unlockedGameIds = unlocks.map((unlock) => unlock.game_id);
+    const projectHints = team.project_id && unlockedGameIds.length > 0
+      ? await prisma.projectHint.findMany({
+          where: {
+            project_id: team.project_id,
+            game_id: { in: unlockedGameIds },
+          },
+          select: { game_id: true, clue_text: true },
+        })
+      : [];
+    const clueByGameId = new Map(projectHints.map((hint) => [hint.game_id, hint.clue_text]));
 
-        return {
-          id: game.id,
-          gameKey: game.game_key,
-          title: game.title,
-          orderNum: (teamGame as any).assigned_order || game.order_num,
-          minSeconds: game.min_seconds,
-          status: teamGame.status,
-          points: (teamGame as any).points || 0,
-          attemptCount: (teamGame as any).attempt_count || 0,
-          lifelineUsed: (teamGame as any).lifeline_used || false,
-          clue: isLegacyRevealed || isP0Revealed ? game.clue_text : null,
-          projectHint: null,
-          puzzle: null,
-        };
-      });
+    const pendingPuzzles = teamGameIds.length > 0
+      ? await prisma.recoveryPuzzle.findMany({
+          where: {
+            team_id: teamId,
+            team_game_id: { in: teamGameIds },
+            status: 'PENDING',
+          },
+          include: {
+            question: {
+              include: {
+                options: { orderBy: { sort_order: 'asc' } },
+              },
+            },
+          },
+        })
+      : [];
+    const puzzleByTeamGameId = new Map(
+      pendingPuzzles.map((puzzle) => [
+        puzzle.team_game_id,
+        {
+          id: puzzle.id,
+          questionText: puzzle.question.question_text,
+          imageUrl: puzzle.question.image_url,
+          options: puzzle.question.options.map((option) => ({
+            id: option.id,
+            text: option.option_text,
+          })),
+        },
+      ])
+    );
+
+    const gamesData = teamGames.map((teamGame) => ({
+      id: teamGame.game.id,
+      gameKey: teamGame.game.game_key,
+      title: teamGame.game.title,
+      orderNum: teamGame.assigned_order,
+      minSeconds: teamGame.game.min_seconds,
+      status: teamGame.status,
+      points: teamGame.points,
+      attemptCount: teamGame.attempt_count,
+      lifelineUsed: teamGame.lifeline_used,
+      clue: clueByGameId.get(teamGame.game_id) || null,
+      projectHint: null,
+      puzzle: puzzleByTeamGameId.get(teamGame.id) || null,
+    }));
 
     const teamScore = {
-      totalPoints: teamGames.reduce(
-        (sum, teamGame) => sum + ((teamGame as any).points || 0),
-        0
-      ),
+      totalPoints: teamGames.reduce((sum, teamGame) => sum + teamGame.points, 0),
       completedGames: teamGames.filter((teamGame) =>
         teamGame.status === 'COMPLETED_NORMAL'
         || teamGame.status === 'COMPLETED_WITH_LIFELINE'

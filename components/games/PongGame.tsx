@@ -1,95 +1,80 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { GameProgressResponse, PongGameState, ServerGameAction } from '@/lib/games/state';
+import { usePausedGameClock } from './usePausedGameClock';
 import { soundManager } from '@/lib/sound';
 
 interface PongGameProps {
+  initialState: PongGameState;
+  onAction: (action: ServerGameAction) => Promise<GameProgressResponse | null>;
   onWin: () => void;
   onLose: () => void;
-  onProgress: (action: 'pongPlayerPoint') => Promise<boolean>;
   minSeconds: number;
   isPaused: boolean;
 }
 
-export default function PongGame({ onWin, onLose, onProgress, minSeconds, isPaused }: PongGameProps) {
+const ACTION_INTERVAL_MS = 400;
+
+export default function PongGame({
+  initialState,
+  onAction,
+  onWin,
+  onLose,
+  minSeconds,
+  isPaused,
+}: PongGameProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [playerScore, setPlayerScore] = useState(0);
-  const [aiScore, setAiScore] = useState(0);
-  const [secondsElapsed, setSecondsElapsed] = useState(0);
+  const [gameState, setGameState] = useState(initialState);
   const [gameOver, setGameOver] = useState(false);
   const [gameWon, setGameWon] = useState(false);
   const [waitingForMinimum, setWaitingForMinimum] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const { secondsElapsed } = usePausedGameClock(isPaused);
+
+  const stateRef = useRef(initialState);
+  const syncedAtRef = useRef(0);
   const pausedRef = useRef(isPaused);
+  const pointerActiveRef = useRef(false);
+  const pointerCenterRef = useRef<number | null>(null);
+  const keysRef = useRef({ up: false, down: false });
+  const busyRef = useRef(false);
+  const finishedRef = useRef(false);
   const winNotifiedRef = useRef(false);
-  const secondsElapsedRef = useRef(0);
-  const progressPromiseRef = useRef<Promise<boolean> | null>(null);
+  const loseNotifiedRef = useRef(false);
+  const propsRef = useRef({ onAction, onWin, onLose, minSeconds, secondsElapsed });
 
-  const winningScore = 3;
+  pausedRef.current = isPaused;
+  propsRef.current = { onAction, onWin, onLose, minSeconds, secondsElapsed };
 
-  const stateRef = useRef({
-    playerY: 150,
-    aiY: 150,
-    paddleHeight: 100,
-    paddleWidth: 10,
-    paddleSpeed: 5,
-    ballX: 200,
-    ballY: 175,
-    ballSpeedX: 2.7,
-    ballSpeedY: 1.8,
-    ballRadius: 6,
-    isAlive: true,
-    keys: { up: false, down: false },
-  });
+  const notifyWin = useCallback(() => {
+    if (winNotifiedRef.current) return;
+    winNotifiedRef.current = true;
+    soundManager.playLevelClear();
+    propsRef.current.onWin();
+  }, []);
 
-  useEffect(() => {
-    pausedRef.current = isPaused;
-  }, [isPaused]);
-
-  // Timer
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (!pausedRef.current) {
-        secondsElapsedRef.current += 1;
-        setSecondsElapsed(secondsElapsedRef.current);
-      }
-    }, 1000);
-    return () => clearInterval(timer);
+  const notifyLose = useCallback(() => {
+    if (loseNotifiedRef.current) return;
+    loseNotifiedRef.current = true;
+    propsRef.current.onLose();
   }, []);
 
   useEffect(() => {
-    if (waitingForMinimum && secondsElapsed >= minSeconds && !winNotifiedRef.current) {
-      winNotifiedRef.current = true;
-      setWaitingForMinimum(false);
-      soundManager.playLevelClear();
-      void (progressPromiseRef.current || Promise.resolve(true)).then((ready) => {
-        if (ready) onWin();
-      });
-    }
-  }, [minSeconds, onWin, secondsElapsed, waitingForMinimum]);
-
-  // Keyboard
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (pausedRef.current || !stateRef.current.isAlive) return;
-      if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
-        stateRef.current.keys.up = true;
-        e.preventDefault();
-      }
-      if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
-        stateRef.current.keys.down = true;
-        e.preventDefault();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (pausedRef.current || finishedRef.current) return;
+      if (event.key === 'ArrowUp' || event.key.toLowerCase() === 'w') {
+        keysRef.current.up = true;
+        event.preventDefault();
+      } else if (event.key === 'ArrowDown' || event.key.toLowerCase() === 's') {
+        keysRef.current.down = true;
+        event.preventDefault();
       }
     };
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
-        stateRef.current.keys.up = false;
-      }
-      if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
-        stateRef.current.keys.down = false;
-      }
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowUp' || event.key.toLowerCase() === 'w') keysRef.current.up = false;
+      if (event.key === 'ArrowDown' || event.key.toLowerCase() === 's') keysRef.current.down = false;
     };
-
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     return () => {
@@ -98,234 +83,218 @@ export default function PongGame({ onWin, onLose, onProgress, minSeconds, isPaus
     };
   }, []);
 
-  // Mouse / Touch paddle tracking
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas || pausedRef.current || !stateRef.current.isAlive) return;
-    const rect = canvas.getBoundingClientRect();
-    const mouseY = e.clientY - rect.top;
-    stateRef.current.playerY = Math.max(
-      0,
-      Math.min(canvas.height - stateRef.current.paddleHeight, mouseY - stateRef.current.paddleHeight / 2)
-    );
-  };
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
 
-  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas || !e.touches[0] || pausedRef.current || !stateRef.current.isAlive) return;
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const touchY = e.touches[0].clientY - rect.top;
-    stateRef.current.playerY = Math.max(
-      0,
-      Math.min(canvas.height - stateRef.current.paddleHeight, touchY - stateRef.current.paddleHeight / 2)
-    );
-  };
+    const advance = async () => {
+      if (disposed) return;
+      if (pausedRef.current || finishedRef.current || busyRef.current) {
+        timer = setTimeout(advance, ACTION_INTERVAL_MS);
+        return;
+      }
 
-  // Game Loop
+      busyRef.current = true;
+      const input = keysRef.current.up === keysRef.current.down
+        ? 'stay'
+        : keysRef.current.up
+          ? 'up'
+          : 'down';
+      const action: ServerGameAction = {
+        type: 'pongStep',
+        input,
+        ...(pointerCenterRef.current !== null
+          ? { paddleCenterY: pointerCenterRef.current }
+          : {}),
+      };
+
+      try {
+        const result = await propsRef.current.onAction(action);
+        if (disposed) return;
+        if (result?.gameState?.gameKey === 'pong') {
+          stateRef.current = result.gameState;
+          syncedAtRef.current = performance.now();
+          setGameState(result.gameState);
+          setErrorMessage('');
+          if (result.failed) {
+            finishedRef.current = true;
+            setGameOver(true);
+            notifyLose();
+          } else if (result.winningReady) {
+            finishedRef.current = true;
+            setGameWon(true);
+            if (propsRef.current.secondsElapsed >= propsRef.current.minSeconds) {
+              notifyWin();
+            } else {
+              setWaitingForMinimum(true);
+            }
+          }
+        } else if (!result) {
+          setErrorMessage('Could not verify this Pong move. Retrying shortly.');
+        }
+      } finally {
+        busyRef.current = false;
+        if (!disposed) timer = setTimeout(advance, ACTION_INTERVAL_MS);
+      }
+    };
+
+    timer = setTimeout(advance, ACTION_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [notifyLose, notifyWin]);
+
+  useEffect(() => {
+    if (waitingForMinimum && secondsElapsed >= minSeconds) {
+      setWaitingForMinimum(false);
+      notifyWin();
+    }
+  }, [minSeconds, notifyWin, secondsElapsed, waitingForMinimum]);
+
+  useEffect(() => {
+    if (initialState.playerScore < initialState.target) return;
+    finishedRef.current = true;
+    setGameWon(true);
+    setWaitingForMinimum(true);
+  }, [initialState.playerScore, initialState.target]);
+
+  useEffect(() => {
+    if (secondsElapsed >= 120 && !finishedRef.current) {
+      finishedRef.current = true;
+      setGameOver(true);
+      notifyLose();
+    }
+  }, [notifyLose, secondsElapsed]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    let animationFrame = 0;
 
-    let pScore = 0;
-    let aScore = 0;
+    const draw = () => {
+      const state = stateRef.current;
+      const frames = Math.min(24, Math.max(0, (performance.now() - syncedAtRef.current) / (1000 / 60)));
+      const ballX = state.ballX + (finishedRef.current ? 0 : state.ballSpeedX * frames);
+      const ballY = Math.max(
+        6,
+        Math.min(state.height - 6, state.ballY + (finishedRef.current ? 0 : state.ballSpeedY * frames))
+      );
+      context.fillStyle = '#06070d';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.strokeStyle = '#1e2238';
+      context.lineWidth = 3;
+      context.setLineDash([8, 8]);
+      context.beginPath();
+      context.moveTo(canvas.width / 2, 0);
+      context.lineTo(canvas.width / 2, canvas.height);
+      context.stroke();
+      context.setLineDash([]);
 
-    const resetBall = (direction: number) => {
-      stateRef.current.ballX = canvas.width / 2;
-      stateRef.current.ballY = canvas.height / 2;
-      stateRef.current.ballSpeedX = direction * 2.7;
-      stateRef.current.ballSpeedY = (Math.random() - 0.5) * 3.2;
+      context.shadowBlur = 10;
+      context.shadowColor = '#00f0ff';
+      context.fillStyle = '#00f0ff';
+      context.fillRect(20, state.playerY, 10, state.paddleHeight);
+      context.shadowColor = '#ff007f';
+      context.fillStyle = '#ff007f';
+      context.fillRect(canvas.width - 30, state.aiY, 10, state.paddleHeight);
+      context.shadowBlur = 12;
+      context.shadowColor = '#ffe600';
+      context.fillStyle = '#ffe600';
+      context.beginPath();
+      context.arc(ballX, ballY, 6, 0, Math.PI * 2);
+      context.fill();
+      context.shadowBlur = 0;
+      animationFrame = requestAnimationFrame(draw);
     };
 
-    const interval = setInterval(() => {
-      const s = stateRef.current;
-      if (!s.isAlive || pausedRef.current) return;
+    syncedAtRef.current = performance.now();
+    animationFrame = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(animationFrame);
+  }, []);
 
-      // Player key movement
-      if (s.keys.up) s.playerY = Math.max(0, s.playerY - s.paddleSpeed);
-      if (s.keys.down) s.playerY = Math.min(canvas.height - s.paddleHeight, s.playerY + s.paddleSpeed);
+  const setPointerPosition = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.height <= 0) return;
+    const canvasY = (event.clientY - rect.top) * (canvas.height / rect.height);
+    pointerCenterRef.current = Math.max(50, Math.min(canvas.height - 50, canvasY));
+  };
 
-      // AI Paddle Movement
-      const aiCenter = s.aiY + s.paddleHeight / 2;
-      if (aiCenter < s.ballY - 15) {
-        s.aiY = Math.min(canvas.height - s.paddleHeight, s.aiY + 2.2);
-      } else if (aiCenter > s.ballY + 15) {
-        s.aiY = Math.max(0, s.aiY - 2.2);
-      }
-
-      // Move Ball
-      s.ballX += s.ballSpeedX;
-      s.ballY += s.ballSpeedY;
-
-      // Bounce top and bottom
-      if (s.ballY - s.ballRadius <= 0 || s.ballY + s.ballRadius >= canvas.height) {
-        s.ballSpeedY = -s.ballSpeedY;
-        soundManager.playBeep(300, 0.04);
-      }
-
-      // Player paddle collision
-      const pLeft = 20;
-      const pRight = 20 + s.paddleWidth;
-      if (
-        s.ballX - s.ballRadius <= pRight &&
-        s.ballX + s.ballRadius >= pLeft &&
-        s.ballY >= s.playerY &&
-        s.ballY <= s.playerY + s.paddleHeight
-      ) {
-        s.ballSpeedX = Math.min(5.2, Math.abs(s.ballSpeedX) * 1.03);
-        const delta = (s.ballY - (s.playerY + s.paddleHeight / 2)) / (s.paddleHeight / 2);
-        s.ballSpeedY = delta * 4;
-        soundManager.playBeep(520, 0.05);
-      }
-
-      // AI paddle collision
-      const aiLeft = canvas.width - 20 - s.paddleWidth;
-      const aiRight = canvas.width - 20;
-      if (
-        s.ballX + s.ballRadius >= aiLeft &&
-        s.ballX - s.ballRadius <= aiRight &&
-        s.ballY >= s.aiY &&
-        s.ballY <= s.aiY + s.paddleHeight
-      ) {
-        s.ballSpeedX = -Math.min(5.2, Math.abs(s.ballSpeedX) * 1.03);
-        const delta = (s.ballY - (s.aiY + s.paddleHeight / 2)) / (s.paddleHeight / 2);
-        s.ballSpeedY = delta * 4;
-        soundManager.playBeep(420, 0.05);
-      }
-
-      // Point scored!
-      if (s.ballX < 0) {
-        // AI scored
-        aScore += 1;
-        setAiScore(aScore);
-        soundManager.playDamage();
-        if (aScore >= winningScore) {
-          s.isAlive = false;
-          setGameOver(true);
-          onLose();
-          return;
-        }
-        resetBall(1);
-      } else if (s.ballX > canvas.width) {
-        // Player scored
-        pScore += 1;
-        setPlayerScore(pScore);
-        soundManager.playCoin();
-        const progressPromise = onProgress('pongPlayerPoint');
-        progressPromiseRef.current = progressPromise;
-        if (pScore >= winningScore) {
-          s.isAlive = false;
-          setGameWon(true);
-          if (secondsElapsedRef.current >= minSeconds) {
-            winNotifiedRef.current = true;
-            soundManager.playLevelClear();
-            void progressPromise.then((ready) => {
-              if (ready) onWin();
-            });
-          } else {
-            setWaitingForMinimum(true);
-          }
-          return;
-        }
-        resetBall(-1);
-      }
-
-      // Render Frame
-      ctx.fillStyle = '#06070d';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      // Center dashed net
-      ctx.strokeStyle = '#1e2238';
-      ctx.lineWidth = 3;
-      ctx.setLineDash([8, 8]);
-      ctx.beginPath();
-      ctx.moveTo(canvas.width / 2, 0);
-      ctx.lineTo(canvas.width / 2, canvas.height);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Draw Player Paddle (Cyan Glow)
-      ctx.shadowBlur = 10;
-      ctx.shadowColor = '#00f0ff';
-      ctx.fillStyle = '#00f0ff';
-      ctx.fillRect(20, s.playerY, s.paddleWidth, s.paddleHeight);
-
-      // Draw AI Paddle (Magenta Glow)
-      ctx.shadowBlur = 10;
-      ctx.shadowColor = '#ff007f';
-      ctx.fillStyle = '#ff007f';
-      ctx.fillRect(canvas.width - 20 - s.paddleWidth, s.aiY, s.paddleWidth, s.paddleHeight);
-
-      // Draw Glowing Ball
-      ctx.shadowBlur = 12;
-      ctx.shadowColor = '#ffe600';
-      ctx.fillStyle = '#ffe600';
-      ctx.beginPath();
-      ctx.arc(s.ballX, s.ballY, s.ballRadius, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.shadowBlur = 0;
-    }, 1000 / 60);
-
-    return () => clearInterval(interval);
-  }, [minSeconds, onLose, onProgress, onWin]);
+  const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    pointerActiveRef.current = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setPointerPosition(event);
+  };
 
   return (
     <div className="flex flex-col items-center justify-center p-4">
-      {/* Score HUD */}
-      <div className="flex items-center justify-between w-full max-w-[440px] mb-3 px-4 py-2 bg-retro-card border border-retro-cyan/40 rounded">
+      <div className="mb-3 flex w-full max-w-[440px] items-center justify-between rounded border border-retro-cyan/40 bg-retro-card px-4 py-2">
         <div>
-          <span className="text-xs text-retro-cyan font-pixel">PLAYER: </span>
-          <span className="font-pixel text-retro-yellow text-sm font-bold">{playerScore}/3</span>
+          <span className="font-pixel text-xs text-retro-cyan">PLAYER: </span>
+          <span className="font-pixel text-sm font-bold text-retro-yellow">{gameState.playerScore}/3</span>
         </div>
         <div>
-          <span className="text-xs text-retro-muted font-pixel">TIME: </span>
+          <span className="font-pixel text-xs text-retro-muted">TIME: </span>
           <span className={`font-pixel text-sm font-bold ${secondsElapsed < minSeconds ? 'text-retro-amber' : 'text-retro-green'}`}>
             {secondsElapsed}s / {minSeconds}s
           </span>
         </div>
         <div>
-          <span className="text-xs text-retro-magenta font-pixel">AI: </span>
-          <span className="font-pixel text-retro-red text-sm font-bold">{aiScore}/3</span>
+          <span className="font-pixel text-xs text-retro-magenta">AI: </span>
+          <span className="font-pixel text-sm font-bold text-retro-red">{gameState.aiScore}/3</span>
         </div>
       </div>
 
-      {/* Canvas */}
-      <div className="relative border-2 border-retro-cyan shadow-neon-cyan rounded overflow-hidden">
+      {errorMessage && (
+        <p className="mb-2 text-center text-xs text-retro-amber" aria-live="polite">{errorMessage}</p>
+      )}
+
+      <div className="relative w-full max-w-[440px] overflow-hidden rounded border-2 border-retro-cyan shadow-neon-cyan">
         <canvas
           ref={canvasRef}
           width={440}
           height={320}
-          onMouseMove={handleMouseMove}
-          onTouchMove={handleTouchMove}
-          onTouchStart={handleTouchMove}
-          className="block bg-retro-bg cursor-ns-resize max-w-full touch-none"
+          onPointerDown={handlePointerDown}
+          onPointerMove={(event) => {
+            if (pointerActiveRef.current) setPointerPosition(event);
+          }}
+          onPointerUp={() => {
+            pointerActiveRef.current = false;
+            pointerCenterRef.current = null;
+          }}
+          onPointerCancel={() => {
+            pointerActiveRef.current = false;
+            pointerCenterRef.current = null;
+          }}
+          className="block h-auto w-full touch-none bg-retro-bg"
+          aria-label="Pong playfield; use W/S, arrow keys, or drag your paddle"
         />
-
-        {/* Scanlines overlay */}
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.35)_50%)] bg-[length:100%_4px] opacity-40" />
-
         {gameOver && (
-          <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center">
-            <h2 className="font-pixel text-retro-red text-2xl mb-2 animate-pulse">DEFLECTOR BREACHED</h2>
-            <p className="text-xs text-retro-muted font-pixel mb-4">-1 LIFELINE PENALTY</p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/85">
+            <h2 className="mb-2 font-pixel text-2xl text-retro-red motion-safe:animate-pulse">DEFLECTOR BREACHED</h2>
+            <p className="mb-4 font-pixel text-xs text-retro-muted">ATTEMPT FAILED · LIFELINE NOT SPENT</p>
           </div>
         )}
         {gameWon && (
-          <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center">
-            <h2 className="font-pixel text-retro-green text-2xl mb-2 motion-safe:animate-bounce">LEVEL CLEARED!</h2>
-            <p className="text-xs text-retro-cyan font-pixel">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/85">
+            <h2 className="mb-2 font-pixel text-2xl text-retro-green motion-safe:animate-bounce">LEVEL CLEARED!</h2>
+            <p className="font-pixel text-xs text-retro-cyan">
               {waitingForMinimum ? `MINIMUM TIME ${secondsElapsed}s / ${minSeconds}s` : 'WIN SUBMITTING...'}
             </p>
           </div>
         )}
       </div>
 
-      {/* Help tooltip */}
-      <p className="text-sm text-retro-muted font-pixel mt-3 text-center">
-        USE [W/S] OR [UP/DOWN] ARROWS, OR DRAG MOUSE / FINGER. FIRST TO 3 WINS.
+      <p className="mt-3 text-center font-pixel text-sm text-retro-muted">
+        USE [W/S] OR [UP/DOWN] ARROWS, OR DRAG YOUR PADDLE. FIRST TO 3 WINS.
+      </p>
+      <p className="mt-2 text-xs text-retro-muted" aria-live="polite">
+        {isPaused ? 'PAUSED — USE OF CONTROLS IS FROZEN' : 'USE THE PADDLE TO DEFLECT EACH SERVE'}
       </p>
     </div>
   );

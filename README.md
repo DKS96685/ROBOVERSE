@@ -22,15 +22,17 @@ The following features are present in the repository:
 
 - Admin and team authentication, team registration, and project assignment.
 - Admin dashboard and event pause/resume controls.
-- Arcade game interfaces, including desktop and mobile controls.
+- Six arcade game interfaces: Snake, Pong, Memory, Target Sequence, Lights Out, and Quick Maze, with desktop and mobile controls.
 - An admin-protected leaderboard route.
-- Application code for randomized persistent game allocation, lifeline retries, recovery puzzles, project-specific game clues, and scoring.
+- Application code for randomized persistent game allocation, lifeline retries, recovery puzzles, project-specific game clues, and server-side scoring.
+- Server-owned progress simulation for Snake and Pong, server-owned card/deck state for Memory, and validated server state/actions for the other included games.
+- Component image uploads with content-signature and size checks. Images currently use deployment-local storage and are not persistent on serverless hosts.
 
 The randomized allocation, lifeline, recovery puzzle, clue, and scoring flows depend on Prisma schema additions that are not represented in the checked-in migration history. A consolidated database migration has not been applied, so these flows are not ready to use against the current database.
 
-Game progress is not yet independently verified to an anti-cheat standard. The progress API accepts client-reported game actions and does not simulate or validate the complete Snake, Pong, or Memory game state. The repository therefore does not yet provide secure server-side verification of gameplay progress or wins.
+The game progress API simulates Snake movement and collisions, Pong ball/paddle outcomes, and Memory card matching on the server. Client-side scores are not authoritative. These application paths still require database migration and end-to-end testing against the event database before they can be used in production.
 
-Do not treat the listed features or competition rules as proof that the platform is production-ready. Before the event, reconcile and review the database migration, apply it only with explicit approval, and complete end-to-end testing of assignments, retries, recovery puzzles, clue access, scoring, and pause/resume behavior.
+Do not treat the listed features or competition rules as proof that the platform is production-ready. Before the event, reconcile and review the database migration, configure persistent puzzle-image storage, apply the database migration only with explicit approval, and complete end-to-end testing of assignments, retries, recovery puzzles, clue access, scoring, and pause/resume behavior.
 
 ## Development Setup
 

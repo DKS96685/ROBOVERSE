@@ -31,8 +31,18 @@ async function saveProjectHints(
     }
   }
 
-  for (const entry of entries) {
-    if (!entry.clueText.trim()) continue;
+  const nonEmptyEntries = entries.filter((entry) => entry.clueText.trim());
+  if (data.hints) {
+    const retainedGameIds = nonEmptyEntries.map((entry) => entry.gameId);
+    await tx.projectHint.deleteMany({
+      where: {
+        project_id: projectId,
+        ...(retainedGameIds.length > 0 ? { game_id: { notIn: retainedGameIds } } : {}),
+      },
+    });
+  }
+
+  for (const entry of nonEmptyEntries) {
     await tx.projectHint.upsert({
       where: {
         project_id_game_id: {
@@ -83,6 +93,14 @@ export async function POST(req: NextRequest) {
   try {
     const session = await requireAuth('admin');
     const body = await req.json();
+
+    const eventState = await prisma.eventState.findUnique({ where: { id: 'global' } });
+    if (eventState && (eventState.status !== 'ready' || eventState.started_at)) {
+      return NextResponse.json(
+        { error: 'Project details and clues cannot be changed after the event has started.' },
+        { status: 409 }
+      );
+    }
 
     if (body.action === 'create') {
       const parsed = projectCreateSchema.safeParse(body);
