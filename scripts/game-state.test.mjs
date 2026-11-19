@@ -22,6 +22,10 @@ import {
   isValidRecoveryQuestion,
   selectGamesForTeam,
 } from '../lib/games/rules.ts';
+import {
+  buildTeamGameAssignmentPlan,
+  isPristineImportedTeamGame,
+} from '../lib/games/teamGameAssignments.ts';
 import sharp from 'sharp';
 import {
   getPuzzleImageExtension,
@@ -239,6 +243,103 @@ test('competition helpers cover points, puzzle validation, duplicate actions, an
   }
   assert.equal(Array.from(counts.values()).reduce((sum, count) => sum + count, 0), 18);
   assert.ok(Math.max(...counts.values()) - Math.min(...counts.values()) <= 1);
+});
+
+const makeImportedPlaceholder = (teamId, gameId, id = `${teamId}-${gameId}`) => ({
+  id,
+  team_id: teamId,
+  game_id: gameId,
+  assignment_run_id: null,
+  assigned_order: 0,
+  required: false,
+  status: gameId.endsWith('0') ? 'available' : 'locked',
+  points: 0,
+  attempt_count: 0,
+  lifeline_used: false,
+  started_at: null,
+  completed_at: null,
+  updated_by: 'system',
+});
+
+test('event allocation reuses pristine imported placeholders without duplicate team-game rows', () => {
+  const teams = [{ id: 'team-1' }, { id: 'team-2' }];
+  const games = Array.from({ length: 6 }, (_, index) => ({ id: `game-${index}` }));
+  const placeholders = teams.flatMap((team) => games.map((game) => makeImportedPlaceholder(team.id, game.id)));
+  const counts = new Map(games.map((game) => [game.id, 0]));
+  const combinations = new Set();
+  const selectedGamesByTeam = new Map(teams.map((team) => [
+    team.id,
+    selectGamesForTeam(games, counts, combinations, () => 0),
+  ]));
+  const enabledGameIds = new Set(games.map((game) => game.id));
+  const plan = buildTeamGameAssignmentPlan(teams, selectedGamesByTeam, enabledGameIds, placeholders, 'run-1');
+
+  assert.equal(plan.updates.length, 6);
+  assert.equal(plan.creates.length, 0);
+  assert.equal(new Set(plan.updates.map(({ id }) => id)).size, 6);
+
+  for (const team of teams) {
+    const assigned = plan.updates.filter(({ data }) => data.team_id === team.id);
+    assert.equal(assigned.length, 3);
+    assert.equal(new Set(assigned.map(({ data }) => data.game_id)).size, 3);
+    assert.ok(assigned.every(({ data }) => data.assignment_run_id === 'run-1' && data.required));
+  }
+
+  const existingPairs = new Set(placeholders.map((row) => JSON.stringify([row.team_id, row.game_id])));
+  const plannedPairs = [...plan.updates, ...plan.creates].map(({ data }) => JSON.stringify([data.team_id, data.game_id]));
+  assert.equal(new Set(plannedPairs).size, plannedPairs.length);
+  assert.ok(plannedPairs.every((pair) => existingPairs.has(pair)));
+});
+
+test('event allocation rejects any non-pristine TeamGame record', () => {
+  const teams = [{ id: 'team-1' }];
+  const games = Array.from({ length: 6 }, (_, index) => ({ id: `game-${index}` }));
+  const progressed = { ...makeImportedPlaceholder('team-1', 'game-0'), points: 1 };
+  const priorAssignment = {
+    ...makeImportedPlaceholder('team-1', 'game-1'),
+    assignment_run_id: 'run-previous',
+    assigned_order: 1,
+    required: true,
+    status: 'NOT_STARTED',
+    updated_by: 'system_allocation',
+  };
+
+  assert.equal(isPristineImportedTeamGame(makeImportedPlaceholder('team-1', 'game-0')), true);
+  assert.equal(isPristineImportedTeamGame(progressed), false);
+  assert.equal(isPristineImportedTeamGame(priorAssignment), false);
+  assert.throws(
+    () => buildTeamGameAssignmentPlan(teams, new Map([['team-1', games.slice(0, 3)]]), new Set(games.map((game) => game.id)), [progressed], 'run-1'),
+    { message: 'NON_PRISTINE_TEAM_GAME' }
+  );
+  assert.throws(
+    () => buildTeamGameAssignmentPlan(teams, new Map([['team-1', games.slice(0, 3)]]), new Set(games.map((game) => game.id)), [priorAssignment], 'run-2'),
+    { message: 'NON_PRISTINE_TEAM_GAME' }
+  );
+});
+
+test('event allocation creates exactly three distinct rows when no placeholders exist', () => {
+  const plan = buildTeamGameAssignmentPlan(
+    [{ id: 'team-1' }],
+    new Map([['team-1', Array.from({ length: 3 }, (_, index) => ({ id: `game-${index}` }))]]),
+    new Set(['game-0', 'game-1', 'game-2']),
+    [],
+    'run-1'
+  );
+
+  assert.equal(plan.updates.length, 0);
+  assert.equal(plan.creates.length, 3);
+  assert.equal(new Set(plan.creates.map((row) => row.game_id)).size, 3);
+});
+
+test('event allocation rejects a selected game outside the enabled-game set', () => {
+  const games = Array.from({ length: 4 }, (_, index) => ({ id: `game-${index}` }));
+  const selected = new Map([['team-1', games.slice(0, 3)]]);
+  const enabledGameIds = new Set(['game-0', 'game-1', 'disabled-game']);
+
+  assert.throws(
+    () => buildTeamGameAssignmentPlan([{ id: 'team-1' }], selected, enabledGameIds, [], 'run-1'),
+    { message: 'SELECTED_GAME_NOT_ENABLED' }
+  );
 });
 
 test('puzzle image upload checks signatures, decoded contents, and size', async () => {

@@ -6,6 +6,10 @@ import crypto from 'crypto';
 import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
 import { isValidRecoveryQuestion, selectGamesForTeam } from '@/lib/games/rules';
 import { assertPuzzleImageStorageAvailable } from '@/lib/storage/puzzleImages';
+import {
+  buildTeamGameAssignmentPlan,
+  isPristineImportedTeamGame,
+} from '@/lib/games/teamGameAssignments';
 
 export const runtime = 'nodejs';
 
@@ -36,14 +40,30 @@ export async function POST(req: NextRequest) {
 
       const updated = await prisma.$transaction(async (tx) => {
         const [
-          existingAssignment,
+          existingAssignments,
           existingSession,
           existingLifelineEvent,
           existingScore,
           existingRecoveryPuzzle,
           existingClueUnlock,
         ] = await Promise.all([
-          tx.teamGame.findFirst({ select: { id: true } }),
+          tx.teamGame.findMany({
+            select: {
+              id: true,
+              team_id: true,
+              game_id: true,
+              assignment_run_id: true,
+              assigned_order: true,
+              required: true,
+              status: true,
+              points: true,
+              attempt_count: true,
+              lifeline_used: true,
+              started_at: true,
+              completed_at: true,
+              updated_by: true,
+            },
+          }),
           tx.gameSession.findFirst({ select: { id: true } }),
           tx.lifelineEvent.findFirst({ select: { id: true } }),
           tx.teamScore.findFirst({ select: { id: true } }),
@@ -51,7 +71,7 @@ export async function POST(req: NextRequest) {
           tx.projectClueUnlock.findFirst({ select: { id: true } }),
         ]);
         if (
-          existingAssignment
+          existingAssignments.some((record) => !isPristineImportedTeamGame(record))
           || existingSession
           || existingLifelineEvent
           || existingScore
@@ -113,30 +133,30 @@ export async function POST(req: NextRequest) {
         const allocationRunId = crypto.randomUUID();
         const assignmentCounts = new Map(enabledGames.map((game) => [game.id, 0]));
         const seenCombinations = new Set<string>();
-
-        for (const team of activeTeams) {
-          const selected = selectGamesForTeam(
+        const selectedGamesByTeam = new Map(activeTeams.map((team) => [
+          team.id,
+          selectGamesForTeam(
             enabledGames,
             assignmentCounts,
             seenCombinations,
             (max) => crypto.randomInt(max)
-          );
+          ),
+        ]));
+        const assignmentPlan = buildTeamGameAssignmentPlan(
+          activeTeams,
+          selectedGamesByTeam,
+          new Set(enabledGames.map((game) => game.id)),
+          existingAssignments,
+          allocationRunId
+        );
+        for (const assignment of assignmentPlan.updates) {
+          await tx.teamGame.update({ where: { id: assignment.id }, data: assignment.data });
+        }
+        for (const assignment of assignmentPlan.creates) {
+          await tx.teamGame.create({ data: assignment });
+        }
 
-          for (let index = 0; index < selected.length; index++) {
-            const game = selected[index];
-            await tx.teamGame.create({
-              data: {
-                team_id: team.id,
-                game_id: game.id,
-                assignment_run_id: allocationRunId,
-                assigned_order: index + 1,
-                required: true,
-                status: index === 0 ? 'NOT_STARTED' : 'NOT_STARTED',
-                updated_by: 'system_allocation',
-              },
-            });
-          }
-
+        for (const team of activeTeams) {
           await tx.teamScore.upsert({
             where: { team_id: team.id },
             update: {
@@ -170,7 +190,7 @@ export async function POST(req: NextRequest) {
             total_paused_seconds: 0,
           },
         });
-      }, { isolationLevel: 'Serializable' });
+      }, { isolationLevel: 'Serializable', timeout: 30000, maxWait: 10000 });
 
       await logAuditEvent({
         actor: session.email || 'admin',
@@ -318,6 +338,18 @@ export async function POST(req: NextRequest) {
     if (error.message === 'EVENT_DATA_EXISTS') {
       return NextResponse.json(
         { error: 'Existing competition history was preserved. Starting a new run is blocked to protect assignments, scores, lifelines, puzzles, and clue unlocks.' },
+        { status: 409 }
+      );
+    }
+    if (error.message === 'NON_PRISTINE_TEAM_GAME' || error.message === 'DUPLICATE_TEAM_GAME_PAIR') {
+      return NextResponse.json(
+        { error: 'Existing team game assignments are not pristine import placeholders.' },
+        { status: 409 }
+      );
+    }
+    if (error.message === 'SELECTED_GAME_NOT_ENABLED') {
+      return NextResponse.json(
+        { error: 'An assigned game is not enabled.' },
         { status: 409 }
       );
     }
