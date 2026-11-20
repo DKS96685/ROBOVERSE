@@ -27,6 +27,7 @@ import {
   buildTeamGameAssignmentPlan,
   isPristineImportedTeamGame,
 } from '../lib/games/teamGameAssignments.ts';
+import { deleteTeamForAdmin } from '../lib/teamDeletion.ts';
 import sharp from 'sharp';
 import {
   getPuzzleImageExtension,
@@ -378,6 +379,183 @@ test('event allocation rejects a selected game outside the enabled-game set', ()
     () => buildTeamGameAssignmentPlan([{ id: 'team-1' }], selected, enabledGameIds, [], 'run-1'),
     { message: 'SELECTED_GAME_NOT_ENABLED' }
   );
+});
+
+const makeTeamDeletionFixture = ({ eventStatus = 'ready', failOn = null } = {}) => {
+  const initial = {
+    teams: [
+      { id: 'team-a', name: 'Team A', login_id: 'team-a' },
+      { id: 'team-b', name: 'Team B', login_id: 'team-b' },
+    ],
+    members: [{ id: 'member-a', team_id: 'team-a' }, { id: 'member-b', team_id: 'team-b' }],
+    teamGames: [{ id: 'game-a', team_id: 'team-a' }, { id: 'game-b', team_id: 'team-b' }],
+    gameSessions: [{ id: 'session-a', team_id: 'team-a' }, { id: 'session-b', team_id: 'team-b' }],
+    teamScores: [{ id: 'score-a', team_id: 'team-a' }, { id: 'score-b', team_id: 'team-b' }],
+    lifelineEvents: [{ id: 'life-a', team_id: 'team-a' }, { id: 'life-b', team_id: 'team-b' }],
+    recoveryPuzzleAttempts: [{ id: 'attempt-a', team_id: 'team-a', puzzle_id: 'puzzle-a' }, { id: 'attempt-b', team_id: 'team-b', puzzle_id: 'puzzle-b' }],
+    recoveryPuzzles: [
+      { id: 'puzzle-a', team_id: 'team-a', team_game_id: 'game-a' },
+      { id: 'puzzle-b', team_id: 'team-b', team_game_id: 'game-b' },
+    ],
+    projectClueUnlocks: [
+      { id: 'unlock-a', team_id: 'team-a', team_game_id: 'game-a' },
+      { id: 'unlock-b', team_id: 'team-b', team_game_id: 'game-b' },
+    ],
+    auditLogs: [{ id: 'audit-a', team_id: 'team-a' }, { id: 'audit-b', team_id: 'team-b' }],
+    projects: [{ id: 'project-shared', name: 'Shared Project' }],
+    projectHints: [{ id: 'hint-shared', project_id: 'project-shared', clue_text: 'Keep this shared clue.' }],
+    questions: [{ id: 'question-shared', text: 'Preserve shared question.' }],
+    answerOptions: [{ id: 'option-shared', question_id: 'question-shared' }],
+    games: [{ id: 'game-shared', game_key: 'snake' }],
+    admins: [{ id: 'admin-1' }],
+    eventState: { id: 'global', status: eventStatus },
+  };
+  const state = structuredClone(initial);
+  const calls = [];
+  const makeDeleteDelegate = (table) => ({
+    deleteMany: async ({ where }) => {
+      calls.push(`${table}.deleteMany`);
+      const countBefore = state[table].length;
+      if (failOn === table) throw new Error('simulated transaction failure');
+      state[table] = state[table].filter((row) => row.team_id !== where.team_id);
+      return { count: countBefore - state[table].length };
+    },
+  });
+  const tx = {
+    eventState: { findUnique: async () => state.eventState },
+    team: {
+      findUnique: async ({ where }) => {
+        const team = state.teams.find((row) => row.id === where.id);
+        return team ? { id: team.id, name: team.name, login_id: team.login_id } : null;
+      },
+      delete: async ({ where }) => {
+        calls.push('team.delete');
+        const teamOwnedTables = [
+          'members', 'teamGames', 'gameSessions', 'teamScores', 'lifelineEvents',
+          'recoveryPuzzleAttempts', 'recoveryPuzzles', 'projectClueUnlocks',
+        ];
+        if (teamOwnedTables.some((table) => state[table].some((row) => row.team_id === where.id))) {
+          throw new Error('dependent row remains');
+        }
+        state.auditLogs = state.auditLogs.map((row) => row.team_id === where.id ? { ...row, team_id: null } : row);
+        state.teams = state.teams.filter((row) => row.id !== where.id);
+      },
+    },
+    member: makeDeleteDelegate('members'),
+    teamGame: makeDeleteDelegate('teamGames'),
+    gameSession: makeDeleteDelegate('gameSessions'),
+    teamScore: makeDeleteDelegate('teamScores'),
+    lifelineEvent: makeDeleteDelegate('lifelineEvents'),
+    recoveryPuzzleAttempt: {
+      ...makeDeleteDelegate('recoveryPuzzleAttempts'),
+      findFirst: async ({ where }) => state.recoveryPuzzleAttempts.find((attempt) =>
+        attempt.team_id !== where.team_id.not
+        && state.recoveryPuzzles.some((puzzle) => puzzle.id === attempt.puzzle_id && puzzle.team_id === where.puzzle.is.team_id)
+      ) || null,
+    },
+    recoveryPuzzle: {
+      ...makeDeleteDelegate('recoveryPuzzles'),
+      findFirst: async ({ where }) => state.recoveryPuzzles.find((puzzle) =>
+        puzzle.team_id !== where.team_id.not
+        && state.teamGames.some((teamGame) => teamGame.id === puzzle.team_game_id && teamGame.team_id === where.team_game.is.team_id)
+      ) || null,
+    },
+    projectClueUnlock: {
+      ...makeDeleteDelegate('projectClueUnlocks'),
+      findFirst: async ({ where }) => state.projectClueUnlocks.find((unlock) =>
+        unlock.team_id !== where.team_id.not
+        && state.teamGames.some((teamGame) => teamGame.id === unlock.team_game_id && teamGame.team_id === where.team_game.is.team_id)
+      ) || null,
+    },
+  };
+  const runTransaction = async (operation) => {
+    const snapshot = structuredClone(state);
+    try {
+      return await operation(tx);
+    } catch (error) {
+      for (const key of Object.keys(state)) delete state[key];
+      Object.assign(state, snapshot);
+      throw error;
+    }
+  };
+  return { initial, state, calls, runTransaction };
+};
+
+test('team deletion removes a team with no gameplay history', async () => {
+  const fixture = makeTeamDeletionFixture();
+  fixture.state.gameSessions = [];
+  fixture.state.teamScores = [];
+  fixture.state.teamGames = [];
+  fixture.state.lifelineEvents = [];
+  fixture.state.recoveryPuzzleAttempts = [];
+  fixture.state.recoveryPuzzles = [];
+  fixture.state.projectClueUnlocks = [];
+  const result = await deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction);
+  assert.deepEqual(result, { id: 'team-a', name: 'Team A', login_id: 'team-a' });
+  assert.equal(fixture.state.teams.some((team) => team.id === 'team-a'), false);
+  assert.equal(fixture.state.members.some((member) => member.team_id === 'team-a'), false);
+});
+
+test('team deletion removes existing GameSession and TeamScore rows', async () => {
+  const fixture = makeTeamDeletionFixture();
+  await deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction);
+  assert.equal(fixture.state.gameSessions.some((row) => row.team_id === 'team-a'), false);
+  assert.equal(fixture.state.teamScores.some((row) => row.team_id === 'team-a'), false);
+});
+
+test('team deletion removes TeamGame assignments and lifeline records before deleting the team', async () => {
+  const fixture = makeTeamDeletionFixture();
+  await deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction);
+  assert.equal(fixture.state.teamGames.some((row) => row.team_id === 'team-a'), false);
+  assert.equal(fixture.state.lifelineEvents.some((row) => row.team_id === 'team-a'), false);
+  assert.ok(fixture.calls.indexOf('teamGames.deleteMany') < fixture.calls.indexOf('team.delete'));
+});
+
+test('team deletion preserves every other team record and shared project configuration', async () => {
+  const fixture = makeTeamDeletionFixture();
+  await deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction);
+  for (const table of ['members', 'teamGames', 'gameSessions', 'teamScores', 'lifelineEvents', 'recoveryPuzzleAttempts', 'recoveryPuzzles', 'projectClueUnlocks']) {
+    assert.deepEqual(fixture.state[table], fixture.initial[table].filter((row) => row.team_id === 'team-b'));
+  }
+  for (const table of ['projects', 'projectHints', 'questions', 'answerOptions', 'games', 'admins']) {
+    assert.deepEqual(fixture.state[table], fixture.initial[table]);
+  }
+  assert.equal(fixture.state.auditLogs.find((row) => row.id === 'audit-a').team_id, null);
+  assert.equal(fixture.state.auditLogs.find((row) => row.id === 'audit-b').team_id, 'team-b');
+});
+
+test('team deletion rejects unauthenticated requests before opening a transaction', async () => {
+  const fixture = makeTeamDeletionFixture();
+  let transactionStarted = false;
+  await assert.rejects(
+    deleteTeamForAdmin('team-a', async () => { throw new Error('UNAUTHORIZED'); }, async (operation) => {
+      transactionStarted = true;
+      return fixture.runTransaction(operation);
+    }),
+    { message: 'UNAUTHORIZED' }
+  );
+  assert.equal(transactionStarted, false);
+  assert.deepEqual(fixture.state, fixture.initial);
+});
+
+test('team deletion is rejected while event status is running', async () => {
+  const fixture = makeTeamDeletionFixture({ eventStatus: 'running' });
+  await assert.rejects(deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction), { message: 'EVENT_RUNNING' });
+  assert.deepEqual(fixture.state, fixture.initial);
+});
+
+test('team deletion refuses to cascade through a cross-team gameplay reference', async () => {
+  const fixture = makeTeamDeletionFixture();
+  fixture.state.projectClueUnlocks.push({ id: 'foreign-unlock', team_id: 'team-b', team_game_id: 'game-a' });
+  const before = structuredClone(fixture.state);
+  await assert.rejects(deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction), { message: 'CROSS_TEAM_DEPENDENCY' });
+  assert.deepEqual(fixture.state, before);
+});
+
+test('a failed team deletion transaction restores all team and shared records', async () => {
+  const fixture = makeTeamDeletionFixture({ failOn: 'teamGames' });
+  await assert.rejects(deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction), { message: 'simulated transaction failure' });
+  assert.deepEqual(fixture.state, fixture.initial);
 });
 
 test('puzzle image upload checks signatures, decoded contents, and size', async () => {

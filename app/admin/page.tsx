@@ -40,6 +40,10 @@ export default function AdminDashboard() {
 
   // Modals / forms
   const [selectedTeam, setSelectedTeam] = useState<any | null>(null);
+  const [teamPendingDeletion, setTeamPendingDeletion] = useState<any | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deleteTeamError, setDeleteTeamError] = useState<string | null>(null);
+  const [deletingTeam, setDeletingTeam] = useState(false);
   const [lifelineModalTeam, setLifelineModalTeam] = useState<any | null>(null);
   const [isRegisteringTeam, setIsRegisteringTeam] = useState(false);
   const [registerTeam, setRegisterTeam] = useState({ name: '', loginId: '', password: '', projectId: '', members: ['', '', ''] });
@@ -385,6 +389,31 @@ export default function AdminDashboard() {
       }
     } catch (e: any) {
       alert(e.message);
+    }
+  };
+
+  const handleDeleteTeam = async () => {
+    if (!teamPendingDeletion || deleteConfirmation !== 'DELETE' || deletingTeam) return;
+
+    setDeletingTeam(true);
+    setDeleteTeamError(null);
+    try {
+      const res = await fetch('/api/admin/teams/manage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', teamId: teamPendingDeletion.id }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to delete team.');
+
+      setActionMessage(`Team ${json.team.name} (${json.team.loginId}) deleted permanently.`);
+      setTeamPendingDeletion(null);
+      setDeleteConfirmation('');
+      await Promise.all([fetchData(), fetchPreflight(), fetchLeaderboard(), fetchAuditLogs()]);
+    } catch (error) {
+      setDeleteTeamError(error instanceof Error ? error.message : 'Failed to delete team.');
+    } finally {
+      setDeletingTeam(false);
     }
   };
 
@@ -784,6 +813,17 @@ export default function AdminDashboard() {
                             className="px-2 py-1 bg-retro-card border border-retro-border text-retro-muted hover:text-white font-pixel text-[9px] rounded"
                           >
                             EDIT
+                          </button>
+                          <button
+                            onClick={() => {
+                              setDeleteTeamError(null);
+                              setDeleteConfirmation('');
+                              setTeamPendingDeletion(team);
+                            }}
+                            className="px-2 py-1 bg-retro-card border border-retro-red/70 text-retro-red hover:bg-retro-red/10 font-pixel text-[9px] rounded"
+                            title={`Permanently delete ${team.name}`}
+                          >
+                            DELETE
                           </button>
                         </td>
                       </tr>
@@ -1597,6 +1637,59 @@ export default function AdminDashboard() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {teamPendingDeletion && (
+        <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <section
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-team-title"
+            className="bg-retro-card border-2 border-retro-red shadow-xl p-5 rounded-lg max-w-md w-full"
+          >
+            <h3 id="delete-team-title" className="font-pixel text-xs text-retro-red mb-4">PERMANENTLY DELETE TEAM?</h3>
+            <div className="space-y-3 text-xs font-mono text-white">
+              <p><strong>{teamPendingDeletion.name}</strong> ({teamPendingDeletion.loginId})</p>
+              <p className="text-retro-amber">
+                This permanently deletes this team and its members, assignments, scores, sessions, lifeline records,
+                recovery puzzle attempts, and clue unlocks. This cannot be undone.
+              </p>
+              <p>Type <strong>DELETE</strong> to confirm.</p>
+              <input
+                autoFocus
+                value={deleteConfirmation}
+                onChange={(event) => setDeleteConfirmation(event.target.value)}
+                disabled={deletingTeam}
+                aria-label="Type DELETE to confirm team deletion"
+                className="w-full bg-retro-bg border border-retro-red/60 rounded px-3 py-2 text-white"
+              />
+              {deleteTeamError && <p role="alert" className="text-retro-red">{deleteTeamError}</p>}
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteTeam()}
+                  disabled={deleteConfirmation !== 'DELETE' || deletingTeam}
+                  className="flex-1 py-2 bg-retro-red text-white font-pixel text-[10px] rounded font-bold disabled:opacity-40"
+                >
+                  {deletingTeam ? 'DELETING...' : 'DELETE TEAM PERMANENTLY'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (deletingTeam) return;
+                    setTeamPendingDeletion(null);
+                    setDeleteConfirmation('');
+                    setDeleteTeamError(null);
+                  }}
+                  disabled={deletingTeam}
+                  className="px-4 py-2 bg-retro-border text-retro-muted font-pixel text-[10px] rounded disabled:opacity-40"
+                >
+                  CANCEL
+                </button>
+              </div>
+            </div>
+          </section>
         </div>
       )}
 

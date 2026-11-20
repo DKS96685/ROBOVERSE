@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
-import { teamCreateSchema, teamUpdateSchema } from '@/lib/validations';
+import { teamCreateSchema, teamDeleteSchema, teamUpdateSchema } from '@/lib/validations';
 import { logAuditEvent } from '@/lib/audit';
 import { GAME_RULES } from '@/lib/config/gameRules';
+import { deleteTeamForAdmin } from '@/lib/teamDeletion';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 
@@ -24,6 +25,21 @@ export async function POST(req: NextRequest) {
     const session = await requireAuth('admin');
     const body = await req.json();
     const action = body.action;
+
+    if (action === 'delete') {
+      const parsed = teamDeleteSchema.safeParse(body);
+      if (!parsed.success) {
+        return NextResponse.json({ error: 'A valid team ID is required.' }, { status: 400 });
+      }
+
+      const team = await deleteTeamForAdmin(
+        parsed.data.teamId,
+        async () => session,
+        (operation) => prisma.$transaction(operation, { isolationLevel: 'Serializable' })
+      );
+
+      return NextResponse.json({ success: true, team: { id: team.id, name: team.name, loginId: team.login_id } });
+    }
 
     // 1. Single Team Manual Registration
     if (action === 'create') {
@@ -245,6 +261,18 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+    if (error.message === 'EVENT_RUNNING') {
+      return NextResponse.json({ error: 'Teams cannot be deleted while the event is running. Pause or end the event first.' }, { status: 409 });
+    }
+    if (error.message === 'TEAM_NOT_FOUND') {
+      return NextResponse.json({ error: 'Team not found.' }, { status: 404 });
+    }
+    if (error.message === 'CROSS_TEAM_DEPENDENCY') {
+      return NextResponse.json(
+        { error: 'Deletion was stopped because gameplay records reference another team. No data was changed; contact an administrator.' },
+        { status: 409 }
+      );
     }
     return NextResponse.json({ error: 'Failed to process team request' }, { status: 500 });
   }

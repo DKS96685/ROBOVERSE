@@ -32,6 +32,10 @@ export const teamUpdateSchema = z.object({
   password: z.string().min(6, 'Password must be at least 6 characters').optional(),
 });
 
+export const teamDeleteSchema = z.object({
+  teamId: z.string().uuid(),
+});
+
 export const projectCreateSchema = z.object({
   name: z.string().trim().min(2).max(100),
   description: z.string().trim().min(1).max(5000),
