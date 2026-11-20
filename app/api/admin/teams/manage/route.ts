@@ -5,6 +5,7 @@ import { teamCreateSchema, teamDeleteSchema, teamUpdateSchema } from '@/lib/vali
 import { logAuditEvent } from '@/lib/audit';
 import { nextTeamLoginId } from '@/lib/teams/loginIds';
 import { deleteTeamForAdmin } from '@/lib/teamDeletion';
+import { safeErrorDetails } from '@/lib/safeErrorDetails';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 
@@ -21,10 +22,14 @@ function generateRandomPassword(length = 10): string {
 }
 
 export async function POST(req: NextRequest) {
+  let requestAction = 'unknown';
   try {
     const session = await requireAuth('admin');
     const body = await req.json();
     const action = body.action;
+    if (typeof action === 'string' && ['create', 'delete', 'update_info', 'reset_password'].includes(action)) {
+      requestAction = action;
+    }
 
     if (action === 'delete') {
       const parsed = teamDeleteSchema.safeParse(body);
@@ -258,6 +263,10 @@ export async function POST(req: NextRequest) {
         { status: 409 }
       );
     }
+    console.error('Admin team manage request failed', {
+      action: requestAction,
+      ...safeErrorDetails(error),
+    });
     return NextResponse.json({ error: 'Failed to process team request' }, { status: 500 });
   }
 }

@@ -28,6 +28,7 @@ import {
   isPristineImportedTeamGame,
 } from '../lib/games/teamGameAssignments.ts';
 import { deleteTeamForAdmin } from '../lib/teamDeletion.ts';
+import { safeErrorDetails } from '../lib/safeErrorDetails.ts';
 import sharp from 'sharp';
 import {
   getPuzzleImageExtension,
@@ -657,6 +658,20 @@ test('a failed team deletion transaction restores all team and shared records', 
   const fixture = makeTeamDeletionFixture({ failOn: 'teamGames' });
   await assert.rejects(deleteTeamForAdmin('team-a', async () => true, fixture.runTransaction), { message: 'simulated transaction failure' });
   assert.deepEqual(fixture.state, fixture.initial);
+});
+
+test('server error details retain Prisma diagnostics and redact credentials', () => {
+  const details = safeErrorDetails(Object.assign(new Error('Foreign key failed for postgres://user:password@db.example/app password=hunter2'), {
+    code: 'P2003',
+    clientVersion: 'test-version',
+    meta: { modelName: 'Team', password: 'hunter2', field_name: 'team_id' },
+  }));
+  assert.equal(details.name, 'Error');
+  assert.equal(details.code, 'P2003');
+  assert.equal(details.clientVersion, 'test-version');
+  assert.match(details.message, /Foreign key failed/);
+  assert.doesNotMatch(details.message, /hunter2|user:password@db/);
+  assert.deepEqual(details.meta, { modelName: 'Team', password: '[REDACTED]', field_name: 'team_id' });
 });
 
 test('puzzle image upload checks signatures, decoded contents, and size', async () => {
