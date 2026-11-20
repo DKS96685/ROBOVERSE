@@ -2,8 +2,9 @@ import crypto from 'crypto';
 import { GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getValidatedPuzzleImageExtension } from './imageValidation';
+import { isPuzzleImageReference, PUZZLE_IMAGE_BUCKET } from './imageReference';
 
-const BUCKET = 'roboverse-puzzle-images';
+const BUCKET = PUZZLE_IMAGE_BUCKET;
 const IMAGE_PREFIX = `neon-s3://${BUCKET}/`;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const SIGNED_URL_SECONDS = 3600;
@@ -46,9 +47,7 @@ function getStorageClient(): S3Client {
   return storageClient;
 }
 
-export function isPuzzleImageReference(value: string): boolean {
-  return value.startsWith(IMAGE_PREFIX) && value.length > IMAGE_PREFIX.length;
-}
+export { isPuzzleImageReference } from './imageReference';
 
 export async function assertPuzzleImageStorageAvailable(): Promise<void> {
   await getStorageClient().send(new HeadBucketCommand({ Bucket: BUCKET }));

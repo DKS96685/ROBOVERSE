@@ -35,7 +35,7 @@ export async function GET() {
       );
     }
 
-    // 2. Event clock state
+    // 2. Administrator-controlled event status
     const eventState = await getEventState();
 
     // 3. Lifeline summary

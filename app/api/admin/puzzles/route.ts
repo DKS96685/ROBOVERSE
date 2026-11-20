@@ -9,9 +9,19 @@ import {
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     await requireAuth('admin');
+    const imageReference = new URL(req.url).searchParams.get('imageReference');
+    if (imageReference) {
+      if (!isPuzzleImageReference(imageReference)) {
+        return NextResponse.json({ error: 'Invalid stored image reference.' }, { status: 400 });
+      }
+      return NextResponse.json(
+        { image_preview_url: await resolvePuzzleImageUrl(imageReference) },
+        { headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
     const questions = await prisma.componentQuestion.findMany({
       include: {
         options: { orderBy: { sort_order: 'asc' } },
@@ -30,7 +40,7 @@ export async function GET() {
       ...question,
       image_preview_url: await resolvePuzzleImageUrl(question.image_url),
     })));
-    return NextResponse.json({ questions: questionsWithPreview });
+    return NextResponse.json({ questions: questionsWithPreview }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });

@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
       },
       orderBy: { created_at: 'desc' },
     });
-    if (!puzzle) return NextResponse.json({ puzzle: null });
+    if (!puzzle) return NextResponse.json({ puzzle: null }, { headers: { 'Cache-Control': 'no-store' } });
 
     return NextResponse.json({
       puzzle: {
@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
           text: option.option_text,
         })),
       },
-    });
+    }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });

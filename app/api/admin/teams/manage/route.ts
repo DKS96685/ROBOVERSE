@@ -3,7 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { teamCreateSchema, teamDeleteSchema, teamUpdateSchema } from '@/lib/validations';
 import { logAuditEvent } from '@/lib/audit';
-import { GAME_RULES } from '@/lib/config/gameRules';
+import { nextTeamLoginId } from '@/lib/teams/loginIds';
 import { deleteTeamForAdmin } from '@/lib/teamDeletion';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
@@ -61,15 +61,6 @@ export async function POST(req: NextRequest) {
 
       const { name, members, projectId } = parsed.data;
 
-      // Check 25 team cap
-      const currentTeamCount = await prisma.team.count();
-      if (currentTeamCount >= GAME_RULES.MAX_TEAMS) {
-        return NextResponse.json(
-          { error: `Maximum limit of ${GAME_RULES.MAX_TEAMS} teams has been reached.` },
-          { status: 400 }
-        );
-      }
-
       // Check duplicate name
       const existingName = await prisma.team.findFirst({
         where: { name: { equals: name, mode: 'insensitive' } },
@@ -81,13 +72,6 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // Determine lowest available team login ID (team01 to team25)
-      const existingTeams = await prisma.team.findMany({ select: { login_id: true } });
-      const usedIds = new Set(existingTeams.map((t) => t.login_id.toLowerCase()));
-      const loginId = parsed.data.loginId.toLowerCase();
-      if (usedIds.has(loginId)) {
-        return NextResponse.json({ error: `Login ID "${loginId}" is already in use.` }, { status: 400 });
-      }
       if (projectId) {
         const project = await prisma.project.findUnique({ where: { id: projectId } });
         if (!project) {
@@ -97,32 +81,29 @@ export async function POST(req: NextRequest) {
       const plainPassword = parsed.data.password;
       const passwordHash = await bcrypt.hash(plainPassword, 12);
 
-      const team = await prisma.team.create({
-        data: {
-          name,
-          login_id: loginId,
-          password_hash: passwordHash,
-          project_id: projectId ?? null,
-          active: true,
-          members: {
-            create: members.map((m) => ({ name: m })),
-          },
-        },
-        include: { members: true },
-      });
-
-      // Link games
       const allGames = await prisma.game.findMany({ orderBy: { order_num: 'asc' } });
-      for (let i = 0; i < allGames.length; i++) {
-        await prisma.teamGame.create({
+      const team = await prisma.$transaction(async (tx) => {
+        const nameConflict = await tx.team.findFirst({ where: { name: { equals: name, mode: 'insensitive' } }, select: { id: true } });
+        if (nameConflict) throw new Error('TEAM_NAME_EXISTS');
+        const usedIds = await tx.team.findMany({ select: { login_id: true } });
+        const loginId = nextTeamLoginId(usedIds.map((existing) => existing.login_id));
+        const created = await tx.team.create({
           data: {
-            team_id: team.id,
-            game_id: allGames[i].id,
-            status: i === 0 ? 'available' : 'locked',
-            updated_by: 'system',
+            name, login_id: loginId, password_hash: passwordHash, project_id: projectId ?? null, active: true,
+            members: { create: members.map((member) => ({ name: member })) },
           },
+          include: { members: true },
         });
-      }
+        await tx.teamGame.createMany({
+          data: allGames.map((game, index) => ({
+            team_id: created.id,
+            game_id: game.id,
+            status: index === 0 ? 'available' : 'locked',
+            updated_by: 'system',
+          })),
+        });
+        return created;
+      }, { isolationLevel: 'Serializable' });
 
       await logAuditEvent({
         actor: session.email || 'admin',
@@ -267,6 +248,9 @@ export async function POST(req: NextRequest) {
     }
     if (error.message === 'TEAM_NOT_FOUND') {
       return NextResponse.json({ error: 'Team not found.' }, { status: 404 });
+    }
+    if (error.message === 'TEAM_NAME_EXISTS' || error.code === 'P2002' || error.code === 'P2034') {
+      return NextResponse.json({ error: 'That team name or login ID is already in use. Refresh and try again.' }, { status: 409 });
     }
     if (error.message === 'CROSS_TEAM_DEPENDENCY') {
       return NextResponse.json(

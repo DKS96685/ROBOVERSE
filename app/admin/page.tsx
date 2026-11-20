@@ -6,7 +6,6 @@ import {
   ShieldAlert,
   Play,
   Pause,
-  RotateCcw,
   Square,
   Users,
   Heart,
@@ -46,7 +45,7 @@ export default function AdminDashboard() {
   const [deletingTeam, setDeletingTeam] = useState(false);
   const [lifelineModalTeam, setLifelineModalTeam] = useState<any | null>(null);
   const [isRegisteringTeam, setIsRegisteringTeam] = useState(false);
-  const [registerTeam, setRegisterTeam] = useState({ name: '', loginId: '', password: '', projectId: '', members: ['', '', ''] });
+  const [registerTeam, setRegisterTeam] = useState({ name: '', password: '', projectId: '', members: ['', '', ''] });
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
   const [createdCredentials, setCreatedCredentials] = useState<{ loginId: string; password: string } | null>(null);
@@ -72,6 +71,10 @@ export default function AdminDashboard() {
   // Audit logs
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [puzzles, setPuzzles] = useState<any[]>([]);
+  const [puzzleImageError, setPuzzleImageError] = useState<string | null>(null);
+  const [failedPuzzleImageIds, setFailedPuzzleImageIds] = useState<string[]>([]);
+  const [refreshedPuzzleImageIds, setRefreshedPuzzleImageIds] = useState<string[]>([]);
+  const [puzzlePreviewRefreshed, setPuzzlePreviewRefreshed] = useState(false);
   const [puzzleEditorOpen, setPuzzleEditorOpen] = useState(false);
   const [selectedPuzzle, setSelectedPuzzle] = useState<any | null>(null);
   const [puzzleForm, setPuzzleForm] = useState({
@@ -221,6 +224,18 @@ export default function AdminDashboard() {
     }
   }, []);
 
+  const refreshPuzzleImagePreview = async (imageReference: string) => {
+    setPuzzleImageError(null);
+    try {
+      const res = await fetch(`/api/admin/puzzles?imageReference=${encodeURIComponent(imageReference)}`, { cache: 'no-store' });
+      const json = await res.json();
+      if (!res.ok || !json.image_preview_url) throw new Error(json.error || 'Could not refresh the image preview.');
+      setPuzzleForm((current) => ({ ...current, imagePreviewUrl: json.image_preview_url }));
+    } catch (error) {
+      setPuzzleImageError(error instanceof Error ? error.message : 'Could not load the image preview.');
+    }
+  };
+
   const savePuzzle = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const res = await fetch('/api/admin/puzzles', {
@@ -296,7 +311,6 @@ export default function AdminDashboard() {
         body: JSON.stringify({
           action: 'create',
           name: registerTeam.name.trim(),
-          loginId: registerTeam.loginId.trim(),
           password: registerTeam.password,
           projectId: registerTeam.projectId || null,
           members,
@@ -311,7 +325,7 @@ export default function AdminDashboard() {
       setCreatedCredentials(json.credentials);
       setCredentialCopyMessage('');
       setIsRegisteringTeam(false);
-      setRegisterTeam({ name: '', loginId: '', password: '', projectId: '', members: ['', '', ''] });
+      setRegisterTeam({ name: '', password: '', projectId: '', members: ['', '', ''] });
       fetchData();
       fetchProjects();
       fetchAuditLogs();
@@ -343,10 +357,7 @@ export default function AdminDashboard() {
   }, [fetchData, fetchLeaderboard, fetchAuditLogs, fetchProjects, fetchGameLibrary, fetchPuzzles, fetchPreflight]);
 
   // Event control handler
-  const handleEventAction = async (action: 'start' | 'pause' | 'resume' | 'end' | 'reset') => {
-    if (action === 'reset' && !confirm('WARNING: Are you sure you want to RESET the event state to Ready?')) {
-      return;
-    }
+  const handleEventAction = async (action: 'start' | 'pause' | 'resume' | 'end') => {
     try {
       const res = await fetch('/api/admin/event/action', {
         method: 'POST',
@@ -440,14 +451,6 @@ export default function AdminDashboard() {
     }
   };
 
-  // Format time
-  const formatTime = (secs: number) => {
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const s = secs % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  };
-
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     router.push('/');
@@ -523,17 +526,9 @@ export default function AdminDashboard() {
               onClick={() => handleEventAction('end')}
               className="px-2.5 py-1.5 bg-retro-card border border-retro-red/60 text-retro-red font-pixel text-[10px] rounded hover:bg-retro-red/20 flex items-center gap-1"
             >
-              <Square className="w-3 h-3 fill-current" /> END
+              <Square className="w-3 h-3 fill-current" /> END EVENT
             </button>
           )}
-
-          <button
-            onClick={() => handleEventAction('reset')}
-            className="px-2 py-1.5 bg-retro-card border border-retro-border text-retro-muted font-pixel text-[10px] rounded hover:text-white"
-            title="Reset Event to Ready"
-          >
-            <RotateCcw className="w-3 h-3" />
-          </button>
 
           <button
             onClick={handleLogout}
@@ -567,18 +562,6 @@ export default function AdminDashboard() {
               {eventState.status}
             </span>
           </div>
-          <div>
-            <span className="text-retro-muted">CLOCK: </span>
-            <span className="font-pixel text-white font-bold text-sm tracking-wider">
-              {formatTime(eventState.remainingSeconds)}
-            </span>
-          </div>
-          <div>
-            <span className="text-retro-muted">SLOT: </span>
-            <span className="font-pixel text-retro-yellow font-bold">
-              {eventState.currentSlot} / 4 (45m slots)
-            </span>
-          </div>
         </div>
 
         {actionMessage && (
@@ -606,10 +589,33 @@ export default function AdminDashboard() {
             {(preflight?.missingHints?.length > 0) && (
               <span className="text-retro-red">{preflight.missingHints.length} teams need game clues</span>
             )}
-            {preflight && !preflight.canStart && preflight.missingProjects?.length === 0 && preflight.missingHints?.length === 0 && (
-              <span className="text-retro-red">Resolve the remaining pre-flight requirements above.</span>
-            )}
           </div>
+          {preflight?.history && (
+            <div className="mx-auto mt-3 max-w-7xl border-t border-retro-border/60 pt-2 text-[11px] text-retro-muted">
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                <span>TeamGame: {preflight.history.teamGameCount} total · {preflight.history.pristineTeamGameCount} pristine · {preflight.history.nonPristineTeamGames.length} non-pristine</span>
+                <span>Sessions: {preflight.history.counts.gameSessions}</span>
+                <span>Scores: {preflight.history.counts.teamScores}</span>
+                <span>Lifelines: {preflight.history.counts.lifelineEvents}</span>
+                <span>Recovery puzzles: {preflight.history.counts.recoveryPuzzles}</span>
+                <span>Clue unlocks: {preflight.history.counts.projectClueUnlocks}</span>
+              </div>
+              {preflight.history.nonPristineTeamGames.length > 0 && (
+                <p className="mt-1 text-retro-red">Non-pristine assignments exist for: {preflight.history.nonPristineTeamGames.map((row: any) => `${row.teamId}/${row.gameId}`).join(', ')}</p>
+              )}
+              {preflight.history.duplicateTeamGamePairs.length > 0 && (
+                <p className="mt-1 text-retro-red">Duplicate team/game assignments: {preflight.history.duplicateTeamGamePairs.map((row: any) => `${row.teamId}/${row.gameId}`).join(', ')}</p>
+              )}
+              {preflight.blockingReasons.length > 0 && (
+                <ul className="mt-2 list-disc pl-5 text-retro-red">
+                  {preflight.blockingReasons.map((reason: string, index: number) => <li key={`${reason}-${index}`}>{reason}</li>)}
+                </ul>
+              )}
+              {!preflight.history.ready && (
+                <p className="mt-2 text-retro-amber">For a completely fresh run, remove test teams and their gameplay history through the existing DELETE TEAM action. No global history cleanup is available.</p>
+              )}
+            </div>
+          )}
         </section>
       )}
 
@@ -623,7 +629,7 @@ export default function AdminDashboard() {
               : 'border-transparent text-retro-muted hover:text-white'
           }`}
         >
-          <Users className="w-4 h-4" /> 25 TEAMS OVERVIEW
+          <Users className="w-4 h-4" /> {teams.length} TEAMS OVERVIEW
         </button>
 
         <button
@@ -1020,7 +1026,19 @@ export default function AdminDashboard() {
                       src={question.image_preview_url || question.image_url}
                       alt="Component recovery question"
                       className="w-28 h-20 object-contain border border-retro-border rounded bg-retro-bg"
+                      onError={() => {
+                        if (failedPuzzleImageIds.includes(question.id)) return;
+                        if (refreshedPuzzleImageIds.includes(question.id)) {
+                          setFailedPuzzleImageIds((ids) => [...ids, question.id]);
+                        } else {
+                          setRefreshedPuzzleImageIds((ids) => [...ids, question.id]);
+                          void fetchPuzzles();
+                        }
+                      }}
                     />
+                    {failedPuzzleImageIds.includes(question.id) && (
+                      <span role="alert" className="text-[10px] text-retro-red">Image unavailable after refreshing its private URL.</span>
+                    )}
                     <div className="min-w-0 flex-1">
                       <h3 className="font-pixel text-[11px] text-white">{question.question_text}</h3>
                       <p className="text-[10px] text-retro-muted mt-2">
@@ -1102,7 +1120,7 @@ export default function AdminDashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="font-pixel text-sm text-retro-yellow">
-                  LIVE VENUE RANKINGS · 25 TEAMS
+                  LIVE VENUE RANKINGS · {leaderboardData.length} TEAMS
                 </h3>
                 <p className="text-xs text-retro-muted mt-1">
                   Ranked by completed challenges, then lifelines.
@@ -1258,12 +1276,6 @@ export default function AdminDashboard() {
             </div>
 
             <div className="flex items-center gap-4">
-              <div className="text-right font-pixel text-xs">
-                <span className="text-retro-muted block">TIME REMAINING:</span>
-                <span className="text-retro-yellow text-lg">
-                  {formatTime(eventState.remainingSeconds)}
-                </span>
-              </div>
               <button
                 onClick={() => setIsFullScreenLeaderboard(false)}
                 className="px-4 py-2 bg-retro-card border border-retro-red text-retro-red font-pixel text-xs rounded hover:bg-retro-red/20"
@@ -1273,7 +1285,7 @@ export default function AdminDashboard() {
             </div>
           </div>
 
-          {/* Projector 25-Team Ranking Grid */}
+          {/* Projector ranking grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 my-4 flex-1">
             {leaderboardData.map((t: any) => (
               <div
@@ -1318,7 +1330,7 @@ export default function AdminDashboard() {
 
           {/* Footer Ticker */}
           <div className="border-t border-retro-border pt-3 flex items-center justify-between text-[10px] font-pixel text-retro-muted">
-            <span>25 TEAMS · 100 COMPETITORS · RETRO MINI-GAMES &amp; ROBOTICS CLUES</span>
+            <span>{leaderboardData.length} TEAMS · {leaderboardData.length * 3} COMPETITORS · RETRO MINI-GAMES &amp; ROBOTICS CLUES</span>
             <span className="animate-pulse text-retro-green">● LIVE SERVER SYNC ACTIVE</span>
           </div>
         </div>
@@ -1343,6 +1355,29 @@ export default function AdminDashboard() {
                   className="mt-1 w-full bg-retro-bg border border-retro-border rounded px-3 py-2 text-white"
                 />
               </label>
+              {puzzleForm.imagePreviewUrl && (
+                <div>
+                  <img
+                    src={puzzleForm.imagePreviewUrl}
+                    alt="Recovery question preview"
+                    className="max-h-48 max-w-full object-contain border border-retro-border rounded bg-retro-bg"
+                    onError={() => {
+                      if (!puzzlePreviewRefreshed) {
+                        setPuzzlePreviewRefreshed(true);
+                        void refreshPuzzleImagePreview(puzzleForm.imageUrl);
+                      } else {
+                        setPuzzleImageError('The image could not be loaded after refreshing its private URL.');
+                      }
+                    }}
+                  />
+                  {puzzleImageError && (
+                    <p role="alert" className="mt-1 text-retro-red">
+                      {puzzleImageError}{' '}
+                      <button type="button" onClick={() => { setPuzzlePreviewRefreshed(false); void refreshPuzzleImagePreview(puzzleForm.imageUrl); }} className="underline">Retry image</button>
+                    </p>
+                  )}
+                </div>
+              )}
               <label className="block text-retro-muted">
                 Component image URL
                 <input
@@ -1377,6 +1412,9 @@ export default function AdminDashboard() {
                       imageUrl: json.imageUrl,
                       imagePreviewUrl: json.previewUrl,
                     }));
+                    setPuzzleImageError(null);
+                    setFailedPuzzleImageIds([]);
+                    setPuzzlePreviewRefreshed(false);
                   }}
                   className="mt-1 w-full text-xs text-white"
                 />
@@ -1713,18 +1751,7 @@ export default function AdminDashboard() {
                   className="mt-1 w-full bg-retro-bg border border-retro-border rounded px-3 py-2 text-white"
                 />
               </label>
-              <label className="block text-retro-muted">
-                Login ID
-                <input
-                  type="text"
-                  required
-                  minLength={3}
-                  maxLength={30}
-                  value={registerTeam.loginId}
-                  onChange={(event) => setRegisterTeam({ ...registerTeam, loginId: event.target.value })}
-                  className="mt-1 w-full bg-retro-bg border border-retro-border rounded px-3 py-2 text-white"
-                />
-              </label>
+              <p className="text-retro-muted">A unique login ID will be generated after registration.</p>
               <label className="block text-retro-muted">
                 Password
                 <input

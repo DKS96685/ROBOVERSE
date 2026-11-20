@@ -2,14 +2,8 @@
  * ROBOVERSE Production Game Rules & Settings
  */
 export const GAME_RULES = {
-  // Event Timing
-  EVENT_DURATION_MINUTES: 180, // 3 hours
-  TOTAL_SLOTS: 4,
-  SLOT_DURATION_MINUTES: 45, // 180 / 4 = 45 mins each
-
   // Team Registration
   TEAM_SIZE: 3, // Exactly 3 members per team
-  MAX_TEAMS: 25, // Strictly capped at 25 teams
 
   // Lifelines
   STARTING_LIFELINES: 1,

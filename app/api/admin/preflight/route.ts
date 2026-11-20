@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
 import { hasValidEnabledSupportedGameCount, isValidRecoveryQuestion } from '@/lib/games/rules';
 import { assertPuzzleImageStorageAvailable } from '@/lib/storage/puzzleImages';
+import { inspectEventStartHistory } from '@/lib/eventStartHistory';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -12,7 +13,7 @@ export async function GET() {
   try {
     await requireAuth('admin');
 
-    const [teams, games, activeTeams, recoveryQuestions] = await Promise.all([
+    const [teams, games, activeTeams, recoveryQuestions, event, history] = await Promise.all([
       prisma.team.count({ where: { active: true } }),
       prisma.game.findMany({ orderBy: { order_num: 'asc' } }),
       prisma.team.findMany({
@@ -28,6 +29,8 @@ export async function GET() {
           options: { select: { option_text: true } },
         },
       }),
+      prisma.eventState.findUnique({ where: { id: 'global' }, select: { status: true, started_at: true } }),
+      inspectEventStartHistory(prisma),
     ]);
 
     const enabledGames = games.filter((game) => game.enabled);
@@ -82,7 +85,9 @@ export async function GET() {
       puzzleStorageReady = false;
     }
     const canStart =
-      teams >= 1
+      (!event || (event.status === 'ready' && !event.started_at))
+      && history.ready
+      && teams >= 1
       && hasValidEnabledSupportedGameCount(enabledSupportedGames.length)
       && enabledSupportedGames.length === enabledGames.length
       && gamesReady.filter((game) => game.ready).length === enabledSupportedGames.length
@@ -93,6 +98,19 @@ export async function GET() {
 
     return NextResponse.json({
       teamsCount: teams,
+      eventStatus: event?.status || 'ready',
+      history,
+      blockingReasons: [
+        ...(!event || (event.status === 'ready' && !event.started_at) ? [] : [`Event status is ${event?.status}; start requires READY.`]),
+        ...history.blockingReasons,
+        ...(teams < 1 ? ['At least one active team is required.'] : []),
+        ...(!hasValidEnabledSupportedGameCount(enabledSupportedGames.length) ? ['Enable between three and ten supported games.'] : []),
+        ...(enabledSupportedGames.length !== enabledGames.length ? ['An enabled game is unsupported.'] : []),
+        ...missingProjects.map((name) => `Team ${name} needs an assigned project.`),
+        ...missingHints.map((name) => `Project for ${name} is missing a clue for an enabled game.`),
+        ...(!recoveryQuestionsReady ? ['A valid recovery question is required.'] : []),
+        ...(!puzzleStorageReady ? ['Private puzzle storage is unavailable.'] : []),
+      ],
       gamesReady,
       canStart,
       enabledGamesCount: enabledSupportedGames.length,

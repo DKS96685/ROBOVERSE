@@ -7,12 +7,6 @@ export const loginSchema = z.object({
 
 export const teamCreateSchema = z.object({
   name: z.string().trim().min(2, 'Team name must be at least 2 characters').max(50),
-  loginId: z
-    .string()
-    .trim()
-    .min(3, 'Login ID must be at least 3 characters')
-    .max(30, 'Login ID must be at most 30 characters')
-    .regex(/^[a-zA-Z0-9_-]+$/, 'Login ID can only contain letters, numbers, underscores, and hyphens'),
   password: z.string().min(6, 'Password must be at least 6 characters').max(100),
   projectId: z.string().uuid().nullable().optional(),
   members: z
@@ -72,10 +66,4 @@ export const gameSubmitSchema = z.object({
 export const adminPasswordChangeSchema = z.object({
   currentPassword: z.string().min(1, 'Current password is required'),
   newPassword: z.string().min(8, 'New password must be at least 8 characters'),
-});
-
-export const resetEventSchema = z.object({
-  confirmation: z.literal('RESET', {
-    error: 'You must type RESET to confirm data purge',
-  }),
 });

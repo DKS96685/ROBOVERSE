@@ -7,7 +7,6 @@ import GameModal from '@/components/games/GameModal';
 import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
 import {
   Heart,
-  Clock,
   Users,
   Volume2,
   VolumeX,
@@ -102,14 +101,6 @@ export default function TeamDashboard() {
 
   const { team, eventState, lifelines, games, project, teamScore } = data;
 
-  // Format event remaining time
-  const formatTime = (secs: number) => {
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const s = secs % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  };
-
   // Render the one-team lifeline.
   const renderHearts = () => {
     const hearts = [];
@@ -169,7 +160,7 @@ export default function TeamDashboard() {
       {eventState.isPaused && (
         <div className="fixed inset-x-0 top-0 z-50 bg-retro-red/90 text-black py-2 px-4 text-center font-pixel text-xs sm:text-sm font-bold tracking-widest shadow-lg flex items-center justify-center gap-2">
           <span className="w-3 h-3 rounded-full bg-white animate-ping" />
-          EVENT PAUSED BY ADMIN · EVENT CLOCK AND DRAIN FROZEN
+          GAMEPLAY PAUSED BY ADMIN
           <span className="animate-flicker">_</span>
         </div>
       )}
@@ -219,23 +210,19 @@ export default function TeamDashboard() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* TOP STATUS BAR: Clock + Lifelines */}
+        {/* TOP STATUS BAR: Event status + Lifelines */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* 1. Event Clock Card */}
+          {/* 1. Event status */}
           <div className="bg-retro-card border border-retro-border p-4 rounded-lg flex flex-col justify-between shadow-sm">
             <div className="flex items-center justify-between text-retro-muted text-xs mb-2">
               <span className="font-pixel text-[10px] flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-retro-yellow" />
-                EVENT CLOCK
-              </span>
-              <span className="font-pixel text-[10px] text-retro-yellow">
-                SLOT {eventState.currentSlot} / {4}
+                EVENT STATUS
               </span>
             </div>
 
             <div className="flex items-baseline justify-between">
-              <span className="font-pixel text-2xl sm:text-3xl text-white tracking-widest">
-                {formatTime(eventState.remainingSeconds)}
+              <span className="font-pixel text-2xl sm:text-3xl text-white tracking-widest uppercase">
+                {eventState.status}
               </span>
               <span
                 className={`text-[10px] font-pixel px-2 py-0.5 rounded uppercase ${
@@ -250,7 +237,7 @@ export default function TeamDashboard() {
               </span>
             </div>
             <p className="text-[10px] text-retro-muted font-mono mt-2">
-              3-Hour Build &amp; Game Session · Slot changes every 45m
+              The administrator controls when the event starts, pauses, resumes, and ends.
             </p>
           </div>
 

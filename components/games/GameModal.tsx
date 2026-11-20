@@ -59,10 +59,26 @@ export default function GameModal({
     game.status === 'FIRST_ATTEMPT_FAILED' && lifelinesRemaining > 0
   );
   const [recoveryPuzzle, setRecoveryPuzzle] = useState<any | null>(game.puzzle || null);
+  const [puzzleImageError, setPuzzleImageError] = useState<string | null>(null);
+  const [puzzleImageRefreshAttempted, setPuzzleImageRefreshAttempted] = useState(false);
   const eventPausedRef = useRef(eventPaused);
   const countdownRef = useRef<number | null>(null);
   const resultSubmittedRef = useRef(false);
   const actionSequenceRef = useRef(0);
+
+  const refreshRecoveryPuzzleImage = useCallback(async () => {
+    if (!recoveryPuzzle?.id) return;
+    setPuzzleImageError(null);
+    try {
+      const response = await fetch(`/api/games/puzzle?gameId=${encodeURIComponent(game.id)}`, { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !data.puzzle?.imageUrl) throw new Error(data.error || 'Could not refresh the recovery image.');
+      setRecoveryPuzzle(data.puzzle);
+      setPuzzleImageRefreshAttempted(true);
+    } catch (error) {
+      setPuzzleImageError(error instanceof Error ? error.message : 'Could not load the recovery image.');
+    }
+  }, [game.id, recoveryPuzzle?.id]);
 
   // Result state
   const [resultState, setResultState] = useState<'idle' | 'won' | 'recovered'>('idle');
@@ -292,6 +308,8 @@ export default function GameModal({
           setResultState('idle');
           setIsPlaying(false);
           setRecoveryPuzzle(data.puzzle);
+          setPuzzleImageError(null);
+          setPuzzleImageRefreshAttempted(false);
           setErrorMsg('Recovery puzzle required. The clue remains locked.');
           onRefreshDashboard();
           return;
@@ -533,7 +551,21 @@ export default function GameModal({
                 src={recoveryPuzzle.imageUrl}
                 alt="Electronic component for identification"
                 className="max-h-64 w-auto max-w-full rounded border border-retro-cyan mb-4 object-contain"
+                onError={() => {
+                  if (!puzzleImageRefreshAttempted) {
+                    setPuzzleImageRefreshAttempted(true);
+                    void refreshRecoveryPuzzleImage();
+                  } else {
+                    setPuzzleImageError('The recovery image could not be loaded.');
+                  }
+                }}
               />
+              {puzzleImageError && (
+                <div role="alert" className="mb-3 text-sm text-retro-red">
+                  {puzzleImageError}{' '}
+                  <button type="button" onClick={() => { setPuzzleImageRefreshAttempted(false); void refreshRecoveryPuzzleImage(); }} className="underline">Retry image</button>
+                </div>
+              )}
               <p className="text-sm text-white mb-4 text-center">
                 {recoveryPuzzle.questionText || 'Which electronic component or board is shown in this picture?'}
               </p>

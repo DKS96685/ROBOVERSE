@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { logAuditEvent } from '@/lib/audit';
-import { GAME_RULES } from '@/lib/config/gameRules';
+import { reserveTeamLoginIds } from '@/lib/teams/loginIds';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 
@@ -25,16 +25,6 @@ export async function POST(req: NextRequest) {
 
     if (!Array.isArray(rows) || rows.length === 0) {
       return NextResponse.json({ error: 'No valid team rows provided in CSV payload.' }, { status: 400 });
-    }
-
-    const currentTeamCount = await prisma.team.count();
-    if (currentTeamCount + rows.length > GAME_RULES.MAX_TEAMS) {
-      return NextResponse.json(
-        {
-          error: `Importing ${rows.length} teams would exceed the maximum limit of ${GAME_RULES.MAX_TEAMS} teams (currently ${currentTeamCount} registered).`,
-        },
-        { status: 400 }
-      );
     }
 
     // Validate rows
@@ -99,11 +89,12 @@ export async function POST(req: NextRequest) {
       row.projectId = project.id;
     }
 
-    // Prepare sequential login IDs
-    const usedIds = new Set(existingTeams.map((t) => t.login_id.toLowerCase()));
-    let nextNum = 1;
-
     const allGames = await prisma.game.findMany({ orderBy: { order_num: 'asc' } });
+    const preparedRows: { item: typeof sanitizedRows[number]; plainPassword: string; passwordHash: string }[] = [];
+    for (const item of sanitizedRows) {
+      const plainPassword = generateRandomPassword();
+      preparedRows.push({ item, plainPassword, passwordHash: await bcrypt.hash(plainPassword, 12) });
+    }
     const createdCredentials: {
       teamName: string;
       loginId: string;
@@ -113,53 +104,34 @@ export async function POST(req: NextRequest) {
       member3: string;
     }[] = [];
 
-    for (const item of sanitizedRows) {
-      while (usedIds.has(`team${String(nextNum).padStart(2, '0')}`)) {
-        nextNum++;
-      }
-      const loginId = `team${String(nextNum).padStart(2, '0')}`;
-      usedIds.add(loginId);
-
-      const plainPassword = generateRandomPassword();
-      const passwordHash = await bcrypt.hash(plainPassword, 12);
-
-      const team = await prisma.team.create({
-        data: {
-          name: item.name,
-          login_id: loginId,
-          password_hash: passwordHash,
-          project_id: item.projectId,
-          active: true,
-          members: {
-            create: [
-              { name: item.members[0] },
-              { name: item.members[1] },
-              { name: item.members[2] },
-            ],
-          },
-        },
-      });
-
-      for (let gIdx = 0; gIdx < allGames.length; gIdx++) {
-        await prisma.teamGame.create({
+    await prisma.$transaction(async (tx) => {
+      const currentTeams = await tx.team.findMany({ select: { name: true, login_id: true } });
+      const currentNames = new Set(currentTeams.map((team) => team.name.toLowerCase()));
+      const duplicateName = sanitizedRows.find((item) => currentNames.has(item.name.toLowerCase()));
+      if (duplicateName) throw new Error(`TEAM_NAME_EXISTS:${duplicateName.name}`);
+      const loginIds = reserveTeamLoginIds(currentTeams.map((team) => team.login_id), preparedRows.length);
+      for (const [index, prepared] of preparedRows.entries()) {
+        const { item, plainPassword, passwordHash } = prepared;
+        const loginId = loginIds[index];
+        const team = await tx.team.create({
           data: {
-            team_id: team.id,
-            game_id: allGames[gIdx].id,
-            status: gIdx === 0 ? 'available' : 'locked',
-            updated_by: 'system',
+            name: item.name, login_id: loginId, password_hash: passwordHash,
+            project_id: item.projectId, active: true,
+            members: { create: item.members.map((name) => ({ name })) },
           },
         });
+        await tx.teamGame.createMany({
+          data: allGames.map((game, gameIndex) => ({
+            team_id: team.id, game_id: game.id,
+            status: gameIndex === 0 ? 'available' : 'locked', updated_by: 'system',
+          })),
+        });
+        createdCredentials.push({
+          teamName: item.name, loginId, password: plainPassword,
+          member1: item.members[0], member2: item.members[1], member3: item.members[2],
+        });
       }
-
-      createdCredentials.push({
-        teamName: item.name,
-        loginId,
-        password: plainPassword,
-        member1: item.members[0],
-        member2: item.members[1],
-        member3: item.members[2],
-      });
-    }
+    }, { isolationLevel: 'Serializable', timeout: 60000, maxWait: 10000 });
 
     await logAuditEvent({
       actor: session.email || 'admin',
@@ -175,6 +147,12 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     if (error.message === 'UNAUTHORIZED' || error.message === 'FORBIDDEN') {
       return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+    if (typeof error.message === 'string' && error.message.startsWith('TEAM_NAME_EXISTS:')) {
+      return NextResponse.json({ error: `Team name "${error.message.slice('TEAM_NAME_EXISTS:'.length)}" is already registered.` }, { status: 409 });
+    }
+    if (error.code === 'P2002' || error.code === 'P2034') {
+      return NextResponse.json({ error: 'A team name or login ID conflicted with another registration. Refresh and retry the import.' }, { status: 409 });
     }
     return NextResponse.json({ error: 'Failed to import CSV' }, { status: 500 });
   }

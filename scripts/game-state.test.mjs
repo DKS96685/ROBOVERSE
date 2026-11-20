@@ -34,6 +34,107 @@ import {
   getValidatedPuzzleImageExtension,
 } from '../lib/storage/imageValidation.ts';
 import { runOnce } from '../lib/games/callbacks.ts';
+import { nextTeamLoginId, reserveTeamLoginIds } from '../lib/teams/loginIds.ts';
+import { toEventStateView } from '../lib/eventStateView.ts';
+import { isPristineTeamScore, summarizeEventStartHistory } from '../lib/eventStartHistorySummary.ts';
+import { isPuzzleImageReference } from '../lib/storage/imageReference.ts';
+
+test('event state remains administrator controlled regardless of elapsed wall time', () => {
+  const view = toEventStateView({ status: 'running' });
+  assert.equal(view.status, 'running');
+  assert.equal(view.isRunning, true);
+  assert.deepEqual(Object.keys(view).sort(), ['isEnded', 'isPaused', 'isRunning', 'status']);
+  assert.equal(toEventStateView({ status: 'paused' }).isPaused, true);
+  assert.equal(toEventStateView({ status: 'ended' }).isEnded, true);
+});
+
+test('team login IDs are allocated dynamically beyond 25 and fill gaps', () => {
+  const existing = Array.from({ length: 30 }, (_, index) => `team${String(index + 1).padStart(2, '0')}`);
+  assert.equal(nextTeamLoginId(existing), 'team31');
+  assert.deepEqual(reserveTeamLoginIds(['TEAM01', 'team03'], 3), ['team02', 'team04', 'team05']);
+});
+
+test('shared event history summary blocks every history source and non-pristine assignment', () => {
+  const pristine = makeImportedPlaceholder('team-a', 'game-a');
+  const noHistory = { gameSessions: 0, lifelineEvents: 0, teamScores: 0, nonPristineTeamScores: 0, recoveryPuzzles: 0, projectClueUnlocks: 0 };
+  assert.equal(summarizeEventStartHistory([pristine], noHistory, isPristineImportedTeamGame).ready, true);
+  const blocked = summarizeEventStartHistory(
+    [{ ...pristine, status: 'FIRST_ATTEMPT_FAILED' }],
+    { ...noHistory, gameSessions: 1 },
+    isPristineImportedTeamGame
+  );
+  assert.equal(blocked.ready, false);
+  assert.equal(blocked.nonPristineTeamGames.length, 1);
+  assert.equal(blocked.counts.gameSessions, 1);
+  for (const guardedCount of ['gameSessions', 'lifelineEvents', 'nonPristineTeamScores', 'recoveryPuzzles', 'projectClueUnlocks']) {
+    assert.equal(summarizeEventStartHistory([pristine], { ...noHistory, [guardedCount]: 1 }, isPristineImportedTeamGame).ready, false);
+  }
+  assert.equal(summarizeEventStartHistory([pristine, pristine], noHistory, isPristineImportedTeamGame).ready, false);
+});
+
+test('pristine TeamScore rows are reported but do not block event start', () => {
+  const pristine = makeImportedPlaceholder('team-a', 'game-a');
+  const pristineScores = Array.from({ length: 3 }, () => ({
+    total_points: 0,
+    completed_games: 0,
+    lifeline_used: false,
+    completed_at: null,
+  }));
+  assert.equal(isPristineTeamScore(pristineScores[0]), true);
+  for (const scores of [[], pristineScores.slice(0, 1), pristineScores]) {
+    const teamScores = scores.length;
+    const summary = summarizeEventStartHistory(
+      [pristine],
+      {
+        gameSessions: 0,
+        lifelineEvents: 0,
+        teamScores,
+        nonPristineTeamScores: scores.filter((score) => !isPristineTeamScore(score)).length,
+        recoveryPuzzles: 0,
+        projectClueUnlocks: 0,
+      },
+      isPristineImportedTeamGame
+    );
+    assert.equal(summary.ready, true);
+    assert.equal(summary.counts.teamScores, teamScores);
+  }
+});
+
+test('each gameplay-bearing TeamScore condition blocks event start', () => {
+  const pristine = makeImportedPlaceholder('team-a', 'game-a');
+  const noHistory = { gameSessions: 0, lifelineEvents: 0, teamScores: 1, nonPristineTeamScores: 1, recoveryPuzzles: 0, projectClueUnlocks: 0 };
+  for (const score of [
+    { total_points: 0, completed_games: 1, lifeline_used: false, completed_at: null },
+    { total_points: 1, completed_games: 0, lifeline_used: false, completed_at: null },
+    { total_points: 0, completed_games: 0, lifeline_used: true, completed_at: null },
+    { total_points: 0, completed_games: 0, lifeline_used: false, completed_at: new Date() },
+  ]) {
+    assert.equal(isPristineTeamScore(score), false);
+    const nonPristineTeamScores = Number(!isPristineTeamScore(score));
+    const summary = summarizeEventStartHistory(
+      [pristine],
+      { ...noHistory, nonPristineTeamScores },
+      isPristineImportedTeamGame
+    );
+    assert.equal(summary.ready, false);
+  }
+});
+
+test('pristine TeamScore does not hide session, lifeline, or non-pristine assignment history', () => {
+  const pristine = makeImportedPlaceholder('team-a', 'game-a');
+  const pristineScoreCounts = { gameSessions: 0, lifelineEvents: 0, teamScores: 1, nonPristineTeamScores: 0, recoveryPuzzles: 0, projectClueUnlocks: 0 };
+  assert.equal(summarizeEventStartHistory([pristine], { ...pristineScoreCounts, gameSessions: 1 }, isPristineImportedTeamGame).ready, false);
+  assert.equal(summarizeEventStartHistory([pristine], { ...pristineScoreCounts, lifelineEvents: 1 }, isPristineImportedTeamGame).ready, false);
+  assert.equal(
+    summarizeEventStartHistory([{ ...pristine, status: 'FIRST_ATTEMPT_FAILED' }], pristineScoreCounts, isPristineImportedTeamGame).ready,
+    false
+  );
+});
+
+test('stored puzzle image references can be resolved afresh while direct URLs are not treated as storage keys', () => {
+  assert.equal(isPuzzleImageReference('neon-s3://roboverse-puzzle-images/component-questions/test.png'), true);
+  assert.equal(isPuzzleImageReference('https://example.test/image.png'), false);
+});
 
 test('game completion callbacks run once when the same result is emitted repeatedly', () => {
   const guard = { current: false };

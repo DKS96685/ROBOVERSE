@@ -12,8 +12,8 @@ import {
 import { assertPuzzleImageStorageAvailable } from '@/lib/storage/puzzleImages';
 import {
   buildTeamGameAssignmentPlan,
-  isPristineImportedTeamGame,
 } from '@/lib/games/teamGameAssignments';
+import { inspectEventStartHistory } from '@/lib/eventStartHistory';
 
 export const runtime = 'nodejs';
 
@@ -30,8 +30,8 @@ export async function POST(req: NextRequest) {
     const beforeState = event ? { ...event } : null;
 
     if (action === 'start') {
-      if (event?.status === 'running' || event?.status === 'paused') {
-        return NextResponse.json({ error: 'Event is already running or paused.' }, { status: 409 });
+      if (event && (event.status !== 'ready' || event.started_at)) {
+        return NextResponse.json({ error: `Event cannot start from ${event.status.toUpperCase()} state.` }, { status: 409 });
       }
       try {
         await assertPuzzleImageStorageAvailable();
@@ -43,45 +43,15 @@ export async function POST(req: NextRequest) {
       }
 
       const updated = await prisma.$transaction(async (tx) => {
-        const [
-          existingAssignments,
-          existingSession,
-          existingLifelineEvent,
-          existingScore,
-          existingRecoveryPuzzle,
-          existingClueUnlock,
-        ] = await Promise.all([
-          tx.teamGame.findMany({
-            select: {
-              id: true,
-              team_id: true,
-              game_id: true,
-              assignment_run_id: true,
-              assigned_order: true,
-              required: true,
-              status: true,
-              points: true,
-              attempt_count: true,
-              lifeline_used: true,
-              started_at: true,
-              completed_at: true,
-              updated_by: true,
-            },
-          }),
-          tx.gameSession.findFirst({ select: { id: true } }),
-          tx.lifelineEvent.findFirst({ select: { id: true } }),
-          tx.teamScore.findFirst({ select: { id: true } }),
-          tx.recoveryPuzzle.findFirst({ select: { id: true } }),
-          tx.projectClueUnlock.findFirst({ select: { id: true } }),
-        ]);
-        if (
-          existingAssignments.some((record) => !isPristineImportedTeamGame(record))
-          || existingSession
-          || existingLifelineEvent
-          || existingScore
-          || existingRecoveryPuzzle
-          || existingClueUnlock
-        ) throw new Error('EVENT_DATA_EXISTS');
+        const history = await inspectEventStartHistory(tx);
+        if (!history.ready) throw new Error('EVENT_DATA_EXISTS');
+        const existingAssignments = await tx.teamGame.findMany({
+          select: {
+            id: true, team_id: true, game_id: true, assignment_run_id: true, assigned_order: true,
+            required: true, status: true, points: true, attempt_count: true, lifeline_used: true,
+            started_at: true, completed_at: true, updated_by: true,
+          },
+        });
 
         const activeTeams = await tx.team.findMany({
           where: { active: true },
@@ -185,14 +155,12 @@ export async function POST(req: NextRequest) {
             status: 'running',
             started_at: now,
             paused_at: null,
-            total_paused_seconds: 0,
           },
           create: {
             id: 'global',
             status: 'running',
             started_at: now,
             paused_at: null,
-            total_paused_seconds: 0,
           },
         });
       }, { isolationLevel: 'Serializable', timeout: 30000, maxWait: 10000 });
@@ -242,15 +210,12 @@ export async function POST(req: NextRequest) {
       const pausedSeconds = Math.floor(
         (now.getTime() - new Date(event.paused_at).getTime()) / 1000
       );
-      const newTotalPaused = event.total_paused_seconds + pausedSeconds;
-
       const updated = await prisma.$transaction(async (tx) => {
         const updatedEvent = await tx.eventState.update({
           where: { id: 'global' },
           data: {
             status: 'running',
             paused_at: null,
-            total_paused_seconds: newTotalPaused,
           },
         });
         await tx.gameSession.updateMany({
@@ -282,31 +247,6 @@ export async function POST(req: NextRequest) {
       await logAuditEvent({
         actor: session.email || 'admin',
         action: 'event_end',
-        before: beforeState,
-        after: updated,
-      });
-
-      return NextResponse.json({ success: true, eventState: updated });
-    }
-
-    if (action === 'reset') {
-      if (event?.status === 'running' || event?.status === 'paused') {
-        return NextResponse.json({ error: 'End the event before resetting its state.' }, { status: 409 });
-      }
-
-      const updated = await prisma.eventState.update({
-        where: { id: 'global' },
-        data: {
-          status: 'ready',
-          started_at: null,
-          paused_at: null,
-          total_paused_seconds: 0,
-        },
-      });
-
-      await logAuditEvent({
-        actor: session.email || 'admin',
-        action: 'event_reset',
         before: beforeState,
         after: updated,
       });
