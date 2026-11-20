@@ -52,6 +52,15 @@ export function isNextProgressActionSequence(currentSequence: number, receivedSe
   return Number.isSafeInteger(receivedSequence) && receivedSequence === currentSequence + 1;
 }
 
+export const MIN_ENABLED_SUPPORTED_GAMES = 3;
+export const MAX_ENABLED_SUPPORTED_GAMES = 10;
+
+export function hasValidEnabledSupportedGameCount(count: number): boolean {
+  return Number.isInteger(count)
+    && count >= MIN_ENABLED_SUPPORTED_GAMES
+    && count <= MAX_ENABLED_SUPPORTED_GAMES;
+}
+
 export function selectGamesForTeam<T extends { id: string }>(
   games: T[],
   assignmentCounts: Map<string, number>,

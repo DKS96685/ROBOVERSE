@@ -566,7 +566,7 @@ export default function AdminDashboard() {
               EVENT PRE-FLIGHT: {preflight?.canStart ? 'READY' : 'ACTION REQUIRED'}
             </strong>
             <span>{preflight?.teamsCount ?? '—'} active teams</span>
-            <span>{preflight?.enabledGamesCount ?? '—'} / 6–10 enabled games</span>
+            <span>{preflight?.enabledGamesCount ?? '—'} / 3–10 enabled supported games</span>
             <span>{preflight?.recoveryQuestionsReady ? 'Recovery question ready' : 'Valid recovery question missing'}</span>
             <span className={preflight?.puzzleStorageReady ? 'text-retro-green' : 'text-retro-red'}>
               {preflight?.puzzleStorageReady ? 'Persistent puzzle storage ready' : 'Private puzzle storage unavailable'}
@@ -800,7 +800,7 @@ export default function AdminDashboard() {
               <div>
                 <h2 className="font-pixel text-sm text-retro-cyan">PLAYABLE GAME LIBRARY</h2>
                 <p className="mt-1 text-xs text-retro-muted">
-                  {gameLibrary.filter((game) => game.enabled).length} enabled · enable 6–10 games before event start
+                  {gameLibrary.filter((game) => game.enabled).length} enabled · enable 3–10 supported games before event start
                 </p>
               </div>
               <button

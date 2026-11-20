@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
-import { isValidRecoveryQuestion } from '@/lib/games/rules';
+import { hasValidEnabledSupportedGameCount, isValidRecoveryQuestion } from '@/lib/games/rules';
 import { assertPuzzleImageStorageAvailable } from '@/lib/storage/puzzleImages';
 
 export const dynamic = 'force-dynamic';
@@ -31,6 +31,7 @@ export async function GET() {
     ]);
 
     const enabledGames = games.filter((game) => game.enabled);
+    const enabledSupportedGames = enabledGames.filter((game) => getGameCatalogEntry(game.game_key));
     const gamesReady = games.map((g) => ({
       id: g.id,
       title: g.title,
@@ -41,7 +42,7 @@ export async function GET() {
 
     const missingProjects = activeTeams.filter((team) => !team.project_id).map((team) => team.name);
     const projectIds = Array.from(new Set(activeTeams.flatMap((team) => team.project_id ? [team.project_id] : [])));
-    const enabledIds = enabledGames.map((game) => game.id);
+    const enabledIds = enabledSupportedGames.map((game) => game.id);
     const projectHints = projectIds.length > 0 && enabledIds.length > 0
       ? await prisma.projectHint.findMany({
           where: {
@@ -82,9 +83,9 @@ export async function GET() {
     }
     const canStart =
       teams >= 1
-      && enabledGames.length >= 6
-      && enabledGames.length <= 10
-      && gamesReady.filter((game) => game.ready).length === enabledGames.length
+      && hasValidEnabledSupportedGameCount(enabledSupportedGames.length)
+      && enabledSupportedGames.length === enabledGames.length
+      && gamesReady.filter((game) => game.ready).length === enabledSupportedGames.length
       && missingProjects.length === 0
       && missingHints.length === 0
       && recoveryQuestionsReady
@@ -94,8 +95,8 @@ export async function GET() {
       teamsCount: teams,
       gamesReady,
       canStart,
-      enabledGamesCount: enabledGames.length,
-      requiredEnabledGames: { min: 6, max: 10 },
+      enabledGamesCount: enabledSupportedGames.length,
+      requiredEnabledGames: { min: 3, max: 10 },
       missingProjects,
       missingHints,
       recoveryQuestionsReady,

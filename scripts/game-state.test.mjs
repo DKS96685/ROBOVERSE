@@ -17,6 +17,7 @@ import {
   getGameCompletionPoints,
   getFailedAttemptDisposition,
   getProgressRequestDisposition,
+  hasValidEnabledSupportedGameCount,
   isNextProgressActionSequence,
   isRecoveryAnswerCorrect,
   isValidRecoveryQuestion,
@@ -243,6 +244,43 @@ test('competition helpers cover points, puzzle validation, duplicate actions, an
   }
   assert.equal(Array.from(counts.values()).reduce((sum, count) => sum + count, 0), 18);
   assert.ok(Math.max(...counts.values()) - Math.min(...counts.values()) <= 1);
+});
+
+test('event accepts 3, 4, 5, 6, and 10 enabled supported games and rejects fewer than 3', () => {
+  for (const count of [3, 4, 5, 6, 10]) {
+    assert.equal(hasValidEnabledSupportedGameCount(count), true, `${count} enabled games should be accepted`);
+  }
+  for (const count of [0, 1, 2]) {
+    assert.equal(hasValidEnabledSupportedGameCount(count), false, `${count} enabled games should be rejected`);
+  }
+  assert.equal(hasValidEnabledSupportedGameCount(11), false);
+});
+
+test('each team receives exactly three distinct games from the enabled game set for each supported count', () => {
+  for (const count of [3, 4, 5, 6, 10]) {
+    const gameLibrary = [
+      ...Array.from({ length: count }, (_, index) => ({ id: `enabled-${index}`, enabled: true, supported: true })),
+      { id: 'disabled-game', enabled: false, supported: true },
+      { id: 'unsupported-game', enabled: true, supported: false },
+    ];
+    const eligibleGames = gameLibrary.filter((game) => game.enabled && game.supported);
+    const assignmentCounts = new Map(eligibleGames.map((game) => [game.id, 0]));
+    const combinations = new Set();
+
+    for (let teamIndex = 0; teamIndex < 5; teamIndex++) {
+      const assigned = selectGamesForTeam(
+        eligibleGames,
+        assignmentCounts,
+        combinations,
+        (max) => (teamIndex + max - 1) % max
+      );
+      const assignedIds = assigned.map((game) => game.id);
+      assert.equal(assigned.length, 3, `${count} games: team should receive three games`);
+      assert.equal(new Set(assignedIds).size, 3, `${count} games: team games should be distinct`);
+      assert.ok(assignedIds.every((id) => eligibleGames.some((game) => game.id === id)));
+      assert.ok(assignedIds.every((id) => id !== 'disabled-game' && id !== 'unsupported-game'));
+    }
+  }
 });
 
 const makeImportedPlaceholder = (teamId, gameId, id = `${teamId}-${gameId}`) => ({

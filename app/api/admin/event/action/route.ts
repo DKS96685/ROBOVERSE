@@ -4,7 +4,11 @@ import { prisma } from '@/lib/db';
 import { logAuditEvent } from '@/lib/audit';
 import crypto from 'crypto';
 import { getGameCatalogEntry } from '@/lib/config/gameCatalog';
-import { isValidRecoveryQuestion, selectGamesForTeam } from '@/lib/games/rules';
+import {
+  hasValidEnabledSupportedGameCount,
+  isValidRecoveryQuestion,
+  selectGamesForTeam,
+} from '@/lib/games/rules';
 import { assertPuzzleImageStorageAvailable } from '@/lib/storage/puzzleImages';
 import {
   buildTeamGameAssignmentPlan,
@@ -89,10 +93,11 @@ export async function POST(req: NextRequest) {
           where: { enabled: true },
           orderBy: { order_num: 'asc' },
         });
-        if (enabledGames.length < 6 || enabledGames.length > 10) {
+        const enabledSupportedGames = enabledGames.filter((game) => getGameCatalogEntry(game.game_key));
+        if (!hasValidEnabledSupportedGameCount(enabledSupportedGames.length)) {
           throw new Error('INVALID_ENABLED_GAME_COUNT');
         }
-        if (enabledGames.some((game) => !getGameCatalogEntry(game.game_key))) {
+        if (enabledSupportedGames.length !== enabledGames.length) {
           throw new Error('UNSUPPORTED_ENABLED_GAME');
         }
 
@@ -324,10 +329,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'At least one active team is required.' }, { status: 400 });
     }
     if (error.message === 'NOT_ENOUGH_GAMES') {
-      return NextResponse.json({ error: 'At least six enabled games are required.' }, { status: 400 });
+      return NextResponse.json({ error: 'At least three enabled supported games are required.' }, { status: 400 });
     }
     if (error.message === 'INVALID_ENABLED_GAME_COUNT') {
-      return NextResponse.json({ error: 'Enable between six and ten games before starting the event.' }, { status: 400 });
+      return NextResponse.json({ error: 'Enable between three and ten supported games before starting the event.' }, { status: 400 });
     }
     if (error.message === 'UNSUPPORTED_ENABLED_GAME') {
       return NextResponse.json({ error: 'An enabled game has no playable implementation.' }, { status: 400 });
