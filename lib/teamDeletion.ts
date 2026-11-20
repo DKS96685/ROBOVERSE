@@ -2,6 +2,12 @@ import type { Prisma } from '@prisma/client';
 
 type TeamDeleteTransaction = Prisma.TransactionClient;
 
+export const TEAM_DELETE_TRANSACTION_OPTIONS = {
+  isolationLevel: 'Serializable' as const,
+  timeout: 30_000,
+  maxWait: 10_000,
+};
+
 export type DeletedTeamSummary = {
   id: string;
   name: string;

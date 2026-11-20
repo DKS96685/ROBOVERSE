@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { teamCreateSchema, teamDeleteSchema, teamUpdateSchema } from '@/lib/validations';
 import { logAuditEvent } from '@/lib/audit';
 import { nextTeamLoginId } from '@/lib/teams/loginIds';
-import { deleteTeamForAdmin } from '@/lib/teamDeletion';
+import { deleteTeamForAdmin, TEAM_DELETE_TRANSACTION_OPTIONS } from '@/lib/teamDeletion';
 import { safeErrorDetails } from '@/lib/safeErrorDetails';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
       const team = await deleteTeamForAdmin(
         parsed.data.teamId,
         async () => session,
-        (operation) => prisma.$transaction(operation, { isolationLevel: 'Serializable' })
+        (operation) => prisma.$transaction(operation, TEAM_DELETE_TRANSACTION_OPTIONS)
       );
 
       return NextResponse.json({ success: true, team: { id: team.id, name: team.name, loginId: team.login_id } });

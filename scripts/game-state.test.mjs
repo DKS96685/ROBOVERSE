@@ -27,7 +27,7 @@ import {
   buildTeamGameAssignmentPlan,
   isPristineImportedTeamGame,
 } from '../lib/games/teamGameAssignments.ts';
-import { deleteTeamForAdmin } from '../lib/teamDeletion.ts';
+import { deleteTeamForAdmin, TEAM_DELETE_TRANSACTION_OPTIONS } from '../lib/teamDeletion.ts';
 import { safeErrorDetails } from '../lib/safeErrorDetails.ts';
 import sharp from 'sharp';
 import {
@@ -596,6 +596,14 @@ test('team deletion removes a team with no gameplay history', async () => {
   assert.deepEqual(result, { id: 'team-a', name: 'Team A', login_id: 'team-a' });
   assert.equal(fixture.state.teams.some((team) => team.id === 'team-a'), false);
   assert.equal(fixture.state.members.some((member) => member.team_id === 'team-a'), false);
+});
+
+test('team deletion uses a bounded Serializable Prisma transaction', () => {
+  assert.deepEqual(TEAM_DELETE_TRANSACTION_OPTIONS, {
+    isolationLevel: 'Serializable',
+    timeout: 30_000,
+    maxWait: 10_000,
+  });
 });
 
 test('team deletion removes existing GameSession and TeamScore rows', async () => {
